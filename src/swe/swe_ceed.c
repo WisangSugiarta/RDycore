@@ -115,7 +115,7 @@ static PetscErrorCode CreateQFunctionContext(Ceed ceed, const RDyConfig config, 
 /// @param [in]  mesh    mesh defining the computational domain of the operator
 /// @param [in]  config  RDycore's configuration
 /// @param [out] ceed_op the newly created CeedOperator
-PetscErrorCode CreateSWECeedInteriorFluxOperator(RDyMesh *mesh, const RDyConfig config, CeedOperator *ceed_op) {
+PetscErrorCode CreateSWECeedInteriorFluxOperator(RDyMesh *mesh, const RDyConfig config, CeedOperator *ceed_op, PetscBool compute_all_edges) {
   PetscFunctionBeginUser;
 
   Ceed ceed = CeedContext();
@@ -158,17 +158,21 @@ PetscErrorCode CreateSWECeedInteriorFluxOperator(RDyMesh *mesh, const RDyConfig 
     PetscCallCEED(CeedVectorSetValue(geom, 0.0));
     CeedScalar(*g)[4];
     PetscCallCEED(CeedVectorGetArray(geom, CEED_MEM_HOST, (CeedScalar **)&g));
-    for (CeedInt e = 0, owned_edge = 0; e < mesh->num_internal_edges; e++) {
+    for (CeedInt e = 0; e < mesh->num_internal_edges; e++) {
       CeedInt iedge = edges->internal_edge_ids[e];
-      if (!edges->is_owned[iedge]) continue;
-      CeedInt l        = edges->cell_ids[2 * iedge];
-      CeedInt r        = edges->cell_ids[2 * iedge + 1];
-      g[owned_edge][0] = edges->sn[iedge];
-      g[owned_edge][1] = edges->cn[iedge];
-      g[owned_edge][2] = -edges->lengths[iedge] / cells->areas[l];
-      g[owned_edge][3] = edges->lengths[iedge] / cells->areas[r];
-      owned_edge++;
-    }
+  
+      // Below distinguishes between computing only owned edges or all edges (bool)
+      if (!compute_all_edges && !edges->is_owned[iedge]) continue;
+  
+      CeedInt l = edges->cell_ids[2 * iedge];  // Left cell
+      CeedInt r = edges->cell_ids[2 * iedge + 1];  // Right cell
+  
+      // Compute flux terms (same for both methods)
+      g[e][0] = edges->sn[iedge];
+      g[e][1] = edges->cn[iedge];
+      g[e][2] = -edges->lengths[iedge] / cells->areas[l];
+      g[e][3] = edges->lengths[iedge] / cells->areas[r];
+  }
     PetscCallCEED(CeedVectorRestoreArray(geom, (CeedScalar **)&g));
 
     // create a vector to store flux divergences
