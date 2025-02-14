@@ -117,6 +117,8 @@ static PetscErrorCode CreateQFunctionContext(Ceed ceed, const RDyConfig config, 
 /// @param [out] ceed_op the newly created CeedOperator
 PetscErrorCode CreateSWECeedInteriorFluxOperator(RDyMesh *mesh, const RDyConfig config, CeedOperator *ceed_op) {
   PetscFunctionBeginUser;
+  PetscBool compute_all_edges = PETSC_FALSE;  // Default: old method
+  PetscCall(PetscOptionsGetBool(NULL, NULL, "-compute_all_edges", &compute_all_edges, NULL));
 
   Ceed ceed = CeedContext();
 
@@ -161,13 +163,13 @@ PetscErrorCode CreateSWECeedInteriorFluxOperator(RDyMesh *mesh, const RDyConfig 
     for (CeedInt e = 0; e < mesh->num_internal_edges; e++) {
       CeedInt iedge = edges->internal_edge_ids[e];
   
-      // Below distinguishes between computing only owned edges or all edges (bool)!compute_all_edges && 
-      if (!edges->is_owned[iedge]) continue;
+       
+      if (!compute_all_edges && !edges->is_owned[iedge]) continue; 
   
-      CeedInt l = edges->cell_ids[2 * iedge];  // Left cell
-      CeedInt r = edges->cell_ids[2 * iedge + 1];  // Right cell
+      CeedInt l = edges->cell_ids[2 * iedge];  
+      CeedInt r = edges->cell_ids[2 * iedge + 1]; 
   
-      // Compute flux terms (same for both methods)
+      
       g[e][0] = edges->sn[iedge];
       g[e][1] = edges->cn[iedge];
       g[e][2] = -edges->lengths[iedge] / cells->areas[l];
