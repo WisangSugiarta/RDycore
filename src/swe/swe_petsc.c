@@ -229,7 +229,6 @@ static PetscErrorCode ApplyInteriorFlux(void *context, PetscOperatorFields field
   RDyCells *cells = &mesh->cells;
   RDyEdges *edges = &mesh->edges;
 
-  // get pointers to vector data
   PetscScalar *u_ptr, *f_ptr;
   PetscCall(VecGetArray(u_local, &u_ptr));
   PetscCall(VecGetArray(f_global, &f_ptr));
@@ -237,6 +236,9 @@ static PetscErrorCode ApplyInteriorFlux(void *context, PetscOperatorFields field
   PetscInt n_dof;
   PetscCall(VecGetBlockSize(u_local, &n_dof));
   PetscCheck(n_dof == 3, comm, PETSC_ERR_USER, "Number of dof in local vector must be 3!");
+
+  PetscBool compute_all_flux = PETSC_FALSE;
+  PetscCall(PetscOptionsGetBool(NULL, NULL, "-compute_all_flux", &compute_all_flux, NULL));
 
   RiemannStateData *datal        = &interior_flux_op->left_states;
   RiemannStateData *datar        = &interior_flux_op->right_states;
@@ -268,22 +270,21 @@ static PetscErrorCode ApplyInteriorFlux(void *context, PetscOperatorFields field
   PetscCall(ComputeRiemannVelocities(tiny_h, h_anuga, datal));
   PetscCall(ComputeRiemannVelocities(tiny_h, h_anuga, datar));
 
-  // call Riemann solver (only Roe currently supported)
   PetscCall(ComputeRoeFlux(datal, datar, sn_vec_int, cn_vec_int, flux_vec_int, amax_vec_int));
 
-  // accummulate the flux values in the global flux vector
+  // Accumulate flux values in the global flux vector
   for (PetscInt e = 0; e < mesh->num_internal_edges; e++) {
     PetscInt edge_id             = edges->internal_edge_ids[e];
     PetscInt left_local_cell_id  = edges->cell_ids[2 * edge_id];
     PetscInt right_local_cell_id = edges->cell_ids[2 * edge_id + 1];
 
-    if (right_local_cell_id != -1) {  // internal edge
+    if (right_local_cell_id != -1) {  // Internal edge
       PetscReal edge_len = edges->lengths[edge_id];
 
       PetscReal hl = u_ptr[n_dof * left_local_cell_id + 0];
       PetscReal hr = u_ptr[n_dof * right_local_cell_id + 0];
 
-      if (!(hr < tiny_h && hl < tiny_h)) {  // either cell is "wet"
+      if (!(hr < tiny_h && hl < tiny_h)) {  // Either cell is "wet"
         PetscReal areal = cells->areas[left_local_cell_id];
         PetscReal arear = cells->areas[right_local_cell_id];
 
@@ -292,23 +293,46 @@ static PetscErrorCode ApplyInteriorFlux(void *context, PetscOperatorFields field
         if (cnum > courant_num_diags->max_courant_num) {
           courant_num_diags->max_courant_num = cnum;
           courant_num_diags->global_edge_id  = edges->global_ids[e];
-          if (areal < arear) courant_num_diags->global_cell_id = cells->global_ids[left_local_cell_id];
-          else courant_num_diags->global_cell_id = cells->global_ids[right_local_cell_id];
+          if (areal < arear) 
+            courant_num_diags->global_cell_id = cells->global_ids[left_local_cell_id];
+          else 
+            courant_num_diags->global_cell_id = cells->global_ids[right_local_cell_id];
         }
 
-        for (PetscInt i_dof = 0; i_dof < n_dof; i_dof++) {
-          if (cells->is_owned[left_local_cell_id]) {
-            PetscInt left_owned_cell_id = cells->local_to_owned[left_local_cell_id];
-            f_ptr[n_dof * left_owned_cell_id + i_dof] += flux_vec_int[n_dof * e + i_dof] * (-edge_len / areal);
+        if (compute_all_flux) {
+          // New approach: Update all touching edges, reducing MPI communication
+          PetscInt global_ids[2] = {cells->local_to_owned[left_local_cell_id], cells->local_to_owned[right_local_cell_id]};
+          PetscScalar flux_values[6]; // 3 DOFs per cell * 2 cells
+
+          for (PetscInt i_dof = 0; i_dof < n_dof; i_dof++) {
+            flux_values[i_dof]     = flux_vec_int[n_dof * e + i_dof] * (-edge_len / areal);  
+            flux_values[i_dof + 3] = flux_vec_int[n_dof * e + i_dof] * (edge_len / arear);  
           }
 
-          if (cells->is_owned[right_local_cell_id]) {
-            PetscInt right_owned_cell_id = cells->local_to_owned[right_local_cell_id];
-            f_ptr[n_dof * right_owned_cell_id + i_dof] += flux_vec_int[n_dof * e + i_dof] * (edge_len / arear);
+          PetscCall(VecSetValuesBlocked(f_global, 2, global_ids, flux_values, ADD_VALUES));
+
+        } else {
+          // Original approach: Update only owned cells (requires ghost cell communication)
+          for (PetscInt i_dof = 0; i_dof < n_dof; i_dof++) {
+            if (cells->is_owned[left_local_cell_id]) {
+              PetscInt left_owned_cell_id = cells->local_to_owned[left_local_cell_id];
+              f_ptr[n_dof * left_owned_cell_id + i_dof] += flux_vec_int[n_dof * e + i_dof] * (-edge_len / areal);
+            }
+
+            if (cells->is_owned[right_local_cell_id]) {
+              PetscInt right_owned_cell_id = cells->local_to_owned[right_local_cell_id];
+              f_ptr[n_dof * right_owned_cell_id + i_dof] += flux_vec_int[n_dof * e + i_dof] * (edge_len / arear);
+            }
           }
         }
       }
     }
+  }
+
+  // Ensure parallel consistency if using full edge updates
+  if (compute_all_flux) {
+    PetscCall(VecAssemblyBegin(f_global));
+    PetscCall(VecAssemblyEnd(f_global));
   }
 
   // Restore vectors
