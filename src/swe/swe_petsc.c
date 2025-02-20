@@ -300,9 +300,9 @@ static PetscErrorCode ApplyInteriorFlux(void *context, PetscOperatorFields field
         }
 
         if (compute_all_flux) {
-          // New approach: Update all touching edges, reducing MPI communication
+          // update all touching edges
           PetscInt global_ids[2] = {cells->local_to_owned[left_local_cell_id], cells->local_to_owned[right_local_cell_id]};
-          PetscScalar flux_values[6]; // 3 DOFs per cell * 2 cells
+          PetscScalar flux_values[6]; // 3 DOFs per cell
 
           for (PetscInt i_dof = 0; i_dof < n_dof; i_dof++) {
             flux_values[i_dof]     = flux_vec_int[n_dof * e + i_dof] * (-edge_len / areal);  
@@ -312,7 +312,7 @@ static PetscErrorCode ApplyInteriorFlux(void *context, PetscOperatorFields field
           PetscCall(VecSetValuesBlocked(f_global, 2, global_ids, flux_values, ADD_VALUES));
 
         } else {
-          // Original approach: Update only owned cells (requires ghost cell communication)
+          // original approach
           for (PetscInt i_dof = 0; i_dof < n_dof; i_dof++) {
             if (cells->is_owned[left_local_cell_id]) {
               PetscInt left_owned_cell_id = cells->local_to_owned[left_local_cell_id];
