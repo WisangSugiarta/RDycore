@@ -111,6 +111,9 @@ static PetscErrorCode CreateInteriorFluxQFunction(Ceed ceed, const RDyConfig con
 /// @param [out] ceed_op a CeedOperator that is created and returned
 /// @return 0 on success, or a non-zero error code on failure
 static PetscErrorCode CreateCeedInteriorFluxOperator(const RDyConfig config, RDyMesh *mesh, CeedOperator *ceed_op) {
+  // TODO: make a version of this function that uses num_internal_edges instead of num_owned_internal_edges.
+  // TODO: prepare the geom data correctly for that version (different number of edges)
+  // TODO: note that "libCEED Elements" = "DMPlex Edges"
   PetscFunctionBeginUser;
 
   Ceed ceed = CeedContext();
