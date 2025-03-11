@@ -111,9 +111,6 @@ static PetscErrorCode CreateInteriorFluxQFunction(Ceed ceed, const RDyConfig con
 /// @param [out] ceed_op a CeedOperator that is created and returned
 /// @return 0 on success, or a non-zero error code on failure
 static PetscErrorCode CreateCeedAllInteriorFluxOperator(const RDyConfig config, RDyMesh *mesh, CeedOperator *ceed_op) {
-  // TODO: make a version of this function that uses num_internal_edges instead of num_owned_internal_edges.
-  // TODO: prepare the geom data correctly for that version (different number of edges)
-  // TODO: note that "libCEED Elements" = "DMPlex Edges"
   PetscFunctionBeginUser;
 
   Ceed ceed = CeedContext();
@@ -606,8 +603,15 @@ PetscErrorCode CreateCeedFluxOperator(RDyConfig *config, RDyMesh *mesh, PetscInt
 
   // flux suboperator 0: fluxes between interior cells
 
+  PetscBool compute_all_flux = PETSC_FALSE;
+  PetscCall(PetscOptionsGetBool(NULL, NULL, "-compute_all_flux", &compute_all_flux, NULL));
+
   CeedOperator interior_flux_op;
-  PetscCall(CreateCeedInteriorFluxOperator(*config, mesh, &interior_flux_op));
+  if (compute_all_flux) {
+    PetscCall(CreateCeedAllInteriorFluxOperator(*config, mesh, &interior_flux_op));
+  } else {
+    PetscCall(CreateCeedInteriorFluxOperator(*config, mesh, &interior_flux_op));
+  }
   PetscCall(CeedCompositeOperatorAddSub(*flux_op, interior_flux_op));
 
   // flux suboperators 1 to num_boundaries: fluxes on boundary edges
