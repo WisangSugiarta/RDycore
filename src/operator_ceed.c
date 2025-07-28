@@ -123,7 +123,11 @@ static PetscErrorCode CreateCeedInteriorFluxOperator(const RDyConfig config, RDy
   RDyEdges *edges = &mesh->edges;
 
   CeedQFunction qf;
-  PetscCall(CreateInteriorFluxQFunction(ceed, config, &qf));
+  if (1) {
+    PetscCallCEED(CeedQFunctionCreateInterior(ceed, 1, SWEFluxReconstructed_Roe, SWEFluxReconstructed_Roe_loc, &qf));
+  } else {
+    PetscCall(CreateInteriorFluxQFunction(ceed, config, &qf));
+  }
 
   // add inputs and outputs
   // NOTE: the order in which these inputs and outputs are specified determines
@@ -136,10 +140,30 @@ static PetscErrorCode CreateCeedInteriorFluxOperator(const RDyConfig config, RDy
   PetscCallCEED(CeedQFunctionAddOutput(qf, "cell_right", num_comp, CEED_EVAL_NONE));
   PetscCallCEED(CeedQFunctionAddOutput(qf, "flux", num_comp, CEED_EVAL_NONE));
   PetscCallCEED(CeedQFunctionAddOutput(qf, "courant_number", num_comp_cnum, CEED_EVAL_NONE));
+  if (1) {
+    PetscCallCEED(CeedQFunctionAddInput(qf, "grad_q_left", 6, CEED_EVAL_NONE));
+    PetscCallCEED(CeedQFunctionAddInput(qf, "grad_q_right", 6, CEED_EVAL_NONE));
+  }
 
   // create vectors (and their supporting restrictions) for the operator
   CeedElemRestriction q_restrict_l, q_restrict_r, c_restrict_l, c_restrict_r, restrict_geom, restrict_flux, restrict_cnum;
   CeedVector          geom, flux, cnum;
+  CeedElemRestriction restrict_grad_qL, restrict_grad_qR;
+  CeedVector          grad_qL_vec, grad_qR_vec;
+
+  if (1) {
+    CeedInt grad_stride[3] = {6, 1, 6};  // 6 = 3 variables × 2D
+    CeedInt num_edges = mesh->num_owned_internal_edges;
+
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, 6, 6 * num_edges, grad_stride, &restrict_grad_qL));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_grad_qL, &grad_qL_vec, NULL));
+    PetscCallCEED(CeedVectorSetValue(grad_qL_vec, 0.0));
+
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, 6, 6 * num_edges, grad_stride, &restrict_grad_qR));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_grad_qR, &grad_qR_vec, NULL));
+    PetscCallCEED(CeedVectorSetValue(grad_qR_vec, 0.0));
+  }
+
   {
     CeedInt num_edges = mesh->num_owned_internal_edges;
 
@@ -217,7 +241,10 @@ static PetscErrorCode CreateCeedInteriorFluxOperator(const RDyConfig config, RDy
   PetscCallCEED(CeedOperatorSetField(*ceed_op, "cell_right", c_restrict_r, CEED_BASIS_COLLOCATED, CEED_VECTOR_ACTIVE));
   PetscCallCEED(CeedOperatorSetField(*ceed_op, "flux", restrict_flux, CEED_BASIS_COLLOCATED, flux));
   PetscCallCEED(CeedOperatorSetField(*ceed_op, "courant_number", restrict_cnum, CEED_BASIS_COLLOCATED, cnum));
-
+  if (1) {
+    PetscCallCEED(CeedOperatorSetField(*ceed_op, "grad_q_left", restrict_grad_qL, CEED_BASIS_COLLOCATED, grad_qL_vec));
+    PetscCallCEED(CeedOperatorSetField(*ceed_op, "grad_q_right", restrict_grad_qR, CEED_BASIS_COLLOCATED, grad_qR_vec));
+  }
   // clean up
   PetscCallCEED(CeedElemRestrictionDestroy(&restrict_geom));
   PetscCallCEED(CeedElemRestrictionDestroy(&restrict_flux));
@@ -229,6 +256,12 @@ static PetscErrorCode CreateCeedInteriorFluxOperator(const RDyConfig config, RDy
   PetscCallCEED(CeedVectorDestroy(&geom));
   PetscCallCEED(CeedVectorDestroy(&flux));
   PetscCallCEED(CeedVectorDestroy(&cnum));
+  if (1) {
+    PetscCallCEED(CeedElemRestrictionDestroy(&restrict_grad_qL));
+    PetscCallCEED(CeedElemRestrictionDestroy(&restrict_grad_qR));
+    PetscCallCEED(CeedVectorDestroy(&grad_qL_vec));
+    PetscCallCEED(CeedVectorDestroy(&grad_qR_vec));
+  }
   PetscCallCEED(CeedQFunctionDestroy(&qf));
 
   PetscFunctionReturn(CEED_ERROR_SUCCESS);
