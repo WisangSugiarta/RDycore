@@ -246,6 +246,75 @@ PetscErrorCode CreateSWEPetscInteriorFluxOperator(RDyMesh *mesh, const RDyConfig
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+
+
+/// Creates a PetscOperator that computes fluxes between pairs of cells on the
+/// domain's interior, suitable for the shallow water equations.
+/// @param [in]    mesh        mesh defining the computational domain of the operator
+/// @param [in]    config      RDycore's configuration
+/// @param [inout] diagnostics a set of diagnostics that can be updated by the PetscOperator
+/// @param [out]   petsc_op    the newly created PetscOperator
+PetscErrorCode CreateSWEPetscInteriorFluxOperatorReconstructed(RDyMesh *mesh, const RDyConfig config, OperatorDiagnostics *diagnostics, PetscOperator *petsc_op) {
+  PetscFunctionBegin;
+
+  const PetscInt num_comp = 3;
+  const PetscInt dim = 2;
+
+  InteriorFluxOperator *interior_flux_op;
+  PetscCall(PetscCalloc1(1, &interior_flux_op));
+  *interior_flux_op = (InteriorFluxOperator){
+      .riemann         = config.numerics.riemann,
+      .mesh            = mesh,
+      .diagnostics     = diagnostics,
+      .tiny_h          = config.physics.flow.tiny_h,
+      .h_anuga_regular = config.physics.flow.h_anuga_regular,
+  };
+
+  // allocate left/right/edge Riemann data structures
+  PetscCall(CreateRiemannStateData(mesh->num_internal_edges, &interior_flux_op->left_states));
+  PetscCall(CreateRiemannStateData(mesh->num_internal_edges, &interior_flux_op->right_states));
+  PetscCall(CreateRiemannEdgeData(mesh->num_internal_edges, num_comp, &interior_flux_op->edges));
+
+  PetscCall(PetscCalloc1(mesh->num_internal_edges * dim * num_comp, &interior_flux_op->grad_qL));
+  PetscCall(PetscCalloc1(mesh->num_internal_edges * dim * num_comp, &interior_flux_op->grad_qR));
+
+
+  // copy mesh geometry data into place
+  RDyEdges *edges = &mesh->edges;
+  RDyCells *cells = &mesh->cells;
+
+  PetscFV fvm;
+  PetscCall(DMGetField(mesh->dm, 0, NULL, (PetscObject *)&fvm));
+
+  for (PetscInt e = 0; e < mesh->num_internal_edges; e++) {
+    PetscInt edge_id       = edges->internal_edge_ids[e];
+    PetscInt left_cell_id  = edges->cell_ids[2 * edge_id];
+    PetscInt right_cell_id = edges->cell_ids[2 * edge_id + 1];
+
+    interior_flux_op->edges.cn[e] = edges->cn[edge_id];
+    interior_flux_op->edges.sn[e] = edges->sn[edge_id];
+
+    if (left_cell_id < 0 || right_cell_id < 0) continue;
+
+    // centroid geom for gradients
+    PetscReal dx[2];
+    dx[0] = cells->centroids[2 * right_cell_id]     - cells->centroids[2 * left_cell_id];
+    dx[1] = cells->centroids[2 * right_cell_id + 1] - cells->centroids[2 * left_cell_id + 1];
+
+    //compute gradients for each component
+    for (PetscInt c = 0; c < num_comp; ++c) {
+      PetscScalar grad[2];
+      PetscCall(PetscFVComputeGradient_LeastSquares(fvm, 1, dx, grad));
+      for (PetscInt d = 0; d < dim; ++d) {
+        interior_flux_op->grad_qL[e][d][c] = grad[d];
+        interior_flux_op->grad_qR[e][d][c] = -grad[d];  // optional sign flip
+      }
+    }
+  }
+  PetscCall(PetscOperatorCreate(interior_flux_op, ApplyInteriorFlux, DestroyInteriorFlux, petsc_op));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 //------------------------
 // Boundary Flux Operator
 //------------------------
