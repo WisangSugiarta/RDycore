@@ -189,11 +189,20 @@ PetscErrorCode CreatePetscFluxOperator(RDyConfig *config, RDyMesh *mesh, PetscIn
   // flux suboperator 0: fluxes between interior cells
 
   PetscOperator interior_flux_op;
-  if (config->physics.sediment.num_classes > 0) {
-    PetscCall(CreateSedimentPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
-  } else {
-    PetscCall(CreateSWEPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
+  if (1) {//this is the reconstructed version if - will change later
+    if (config->physics.sediment.num_classes > 0) {
+      PetscCall(CreateSedimentPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
+    } else {
+      PetscCall(CreateSWEPetscInteriorFluxOperatorReconstructed(mesh, *config, diagnostics, &interior_flux_op));
+    }
+  }else{
+    if (config->physics.sediment.num_classes > 0) {
+      PetscCall(CreateSedimentPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
+    } else {
+      PetscCall(CreateSWEPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
+    }
   }
+
   PetscCall(PetscCompositeOperatorAddSub(*flux_op, interior_flux_op));
 
   // flux suboperators 1 to num_boundaries: fluxes on boundary edges
