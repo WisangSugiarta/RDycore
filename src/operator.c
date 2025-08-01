@@ -225,7 +225,7 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
   } else {
     PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                       (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
-                                      &(*operator)->diagnostics, &(*operator)->petsc.flux));
+                                      &(*operator)->diagnostics, &(*operator)->petsc.flux, &domain_dm));
     PetscCall(CreatePetscSourceOperator((*operator)->config, (*operator)->mesh, (*operator)->petsc.external_sources,
                                         (*operator)->petsc.material_properties, &(*operator)->petsc.source));
   }

@@ -152,6 +152,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructed(void *ctx, CeedInt Q, const CeedS
 
 CEED_QFUNCTION(SWEFluxReconstructed_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[]) {
   return SWEFluxReconstructed(ctx, Q, in, out, RIEMANN_FLUX_ROE);
+}
 
 
 // SWE boundary flux operator Q-function (Dirichlet condition)

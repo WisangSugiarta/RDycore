@@ -11,5 +11,7 @@ PETSC_INTERN PetscErrorCode CreateSWEPetscInteriorFluxOperator(RDyMesh *, const 
 PETSC_INTERN PetscErrorCode CreateSWEPetscBoundaryFluxOperator(RDyMesh *, const RDyConfig, RDyBoundary, RDyCondition, Vec, Vec, OperatorDiagnostics *,
                                                                PetscOperator *);
 PETSC_INTERN PetscErrorCode CreateSWEPetscSourceOperator(RDyMesh *, const RDyConfig, Vec, Vec, PetscOperator *);
+PETSC_INTERN PetscErrorCode CreateSWEPetscInteriorFluxOperatorReconstructed(RDyMesh *, const RDyConfig, OperatorDiagnostics *, DM * , PetscOperator *);
+
 
 #endif

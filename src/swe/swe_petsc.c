@@ -230,33 +230,31 @@ static PetscErrorCode ApplyInteriorFluxReconstructed(void *context, PetscOperato
   PetscReal        *amax_vec_int = data_edge->amax;
   PetscReal        *flux_vec_int = data_edge->fluxes;
 
-  PetscReal *centroids = cells->centroids;
+  RDyPoint *centroids = cells->centroids;
   PetscInt   num_edges = mesh->num_internal_edges;
 
   // Evaluate reconstructed values at edge midpoints
+
   for (PetscInt e = 0; e < num_edges; ++e) {
-    PetscInt edge_id       = edges->internal_edge_ids[e];
-    PetscInt left_id       = edges->cell_ids[2 * edge_id];
-    PetscInt right_id      = edges->cell_ids[2 * edge_id + 1];
+    PetscInt edge_id  = edges->internal_edge_ids[e];
+    PetscInt left_id  = edges->cell_ids[2 * edge_id];
+    PetscInt right_id = edges->cell_ids[2 * edge_id + 1];
 
     if (left_id < 0 || right_id < 0) continue;
 
-    // Midpoint of the edge (approx as midpoint of centroids)
-    PetscReal midpoint[2] = {
-      0.5 * (centroids[2 * left_id]     + centroids[2 * right_id]),
-      0.5 * (centroids[2 * left_id + 1] + centroids[2 * right_id + 1])
-    };
+    // Compute midpoint between left and right centroids
+    PetscReal midpoint[2];
+    midpoint[0] = 0.5 * (centroids[left_id].X[0] + centroids[right_id].X[0]);
+    midpoint[1] = 0.5 * (centroids[left_id].X[1] + centroids[right_id].X[1]);
 
-    // Displacements
-    PetscReal dxL[2] = {
-      midpoint[0] - centroids[2 * left_id],
-      midpoint[1] - centroids[2 * left_id + 1]
-    };
+    // Displacement from centroids to midpoint
+    PetscReal dxL[2], dxR[2];
+    dxL[0] = midpoint[0] - centroids[left_id].X[0];
+    dxL[1] = midpoint[1] - centroids[left_id].X[1];
 
-    PetscReal dxR[2] = {
-      midpoint[0] - centroids[2 * right_id],
-      midpoint[1] - centroids[2 * right_id + 1]
-    };
+    dxR[0] = midpoint[0] - centroids[right_id].X[0];
+    dxR[1] = midpoint[1] - centroids[right_id].X[1];
+
 
     // Compute reconstructed states
     for (PetscInt c = 0; c < num_comp; c++) {
@@ -419,7 +417,7 @@ PetscErrorCode CreateSWEPetscInteriorFluxOperator(RDyMesh *mesh, const RDyConfig
 /// @param [in]    config      RDycore's configuration
 /// @param [inout] diagnostics a set of diagnostics that can be updated by the PetscOperator
 /// @param [out]   petsc_op    the newly created PetscOperator
-PetscErrorCode CreateSWEPetscInteriorFluxOperatorReconstructed(RDyMesh *mesh, const RDyConfig config, OperatorDiagnostics *diagnostics, PetscOperator *petsc_op) {
+PetscErrorCode CreateSWEPetscInteriorFluxOperatorReconstructed(RDyMesh *mesh, const RDyConfig config, OperatorDiagnostics *diagnostics, DM *dm, PetscOperator *petsc_op) {
   PetscFunctionBegin;
 
   const PetscInt num_comp = 3;
@@ -449,7 +447,7 @@ PetscErrorCode CreateSWEPetscInteriorFluxOperatorReconstructed(RDyMesh *mesh, co
   RDyCells *cells = &mesh->cells;
 
   PetscFV fvm;
-  PetscCall(DMGetField(mesh->dm, 0, NULL, (PetscObject *)&fvm));
+  PetscCall(DMGetField(*dm, 0, NULL, (PetscObject *)&fvm));
 
   for (PetscInt e = 0; e < mesh->num_internal_edges; e++) {
     PetscInt edge_id       = edges->internal_edge_ids[e];
@@ -463,16 +461,21 @@ PetscErrorCode CreateSWEPetscInteriorFluxOperatorReconstructed(RDyMesh *mesh, co
 
     // centroid geom for gradients
     PetscReal dx[2];
-    dx[0] = cells->centroids[2 * right_cell_id]     - cells->centroids[2 * left_cell_id];
-    dx[1] = cells->centroids[2 * right_cell_id + 1] - cells->centroids[2 * left_cell_id + 1];
+    RDyPoint cL = cells->centroids[left_cell_id];
+    RDyPoint cR = cells->centroids[right_cell_id];
+
+    dx[0] = cR.X[0] - cL.X[0];
+    dx[1] = cR.X[1] - cL.X[1];
+
 
     //compute gradients for each component
     for (PetscInt c = 0; c < num_comp; ++c) {
       PetscScalar grad[2];
       PetscCall(PetscFVComputeGradient_LeastSquares(fvm, 1, dx, grad));
       for (PetscInt d = 0; d < dim; d++) {
-        interior_flux_op->grad_qL[e][d][c] = grad[d];
-        interior_flux_op->grad_qR[e][d][c] = -grad[d];
+        interior_flux_op->grad_qL[(e * dim + d) * num_comp + c] = grad[d];
+        interior_flux_op->grad_qR[(e * dim + d) * num_comp + c] = -grad[d];
+
       }
     }
   }
