@@ -1,7 +1,7 @@
 #include <private/rdymathimpl.h>
 #include <private/rdysweimpl.h>
+#include <petscdmplex.h>
 #include <petscfv.h>
-
 
 #include "swe_roe_petsc_impl.h"
 
@@ -431,59 +431,57 @@ PetscErrorCode CreateSWEPetscInteriorFluxOperatorReconstructed(RDyMesh *mesh, co
       .diagnostics     = diagnostics,
       .tiny_h          = config.physics.flow.tiny_h,
       .h_anuga_regular = config.physics.flow.h_anuga_regular,
-  };//may have to change this to incorporate the reconstruction gradients
+  };
 
-  // allocate left/right/edge Riemann data structures
+  // Allocate Riemann state and edge geometry storage
   PetscCall(CreateRiemannStateData(mesh->num_internal_edges, &interior_flux_op->left_states));
   PetscCall(CreateRiemannStateData(mesh->num_internal_edges, &interior_flux_op->right_states));
   PetscCall(CreateRiemannEdgeData(mesh->num_internal_edges, num_comp, &interior_flux_op->edges));
 
-  PetscCall(PetscCalloc1(mesh->num_internal_edges * dim * num_comp, &interior_flux_op->grad_qL));
-  PetscCall(PetscCalloc1(mesh->num_internal_edges * dim * num_comp, &interior_flux_op->grad_qR));
+  // Allocate space for per-edge gradient weights (only dim values per edge — no component yet)
+  PetscCall(PetscCalloc1(mesh->num_internal_edges * dim, &interior_flux_op->grad_qL));
+  PetscCall(PetscCalloc1(mesh->num_internal_edges * dim, &interior_flux_op->grad_qR));
 
-
-  // copy mesh geometry data into place
   RDyEdges *edges = &mesh->edges;
   RDyCells *cells = &mesh->cells;
 
+  // Set up least-squares FV object for gradient computation
   PetscFV fvm;
   PetscCall(DMGetField(*dm, 0, NULL, (PetscObject *)&fvm));
+  PetscCall(PetscFVSetType(fvm, PETSCFVLEASTSQUARES));
+  PetscCall(PetscFVLeastSquaresSetMaxFaces(fvm, 1));  // 2-point directional stencil
 
   for (PetscInt e = 0; e < mesh->num_internal_edges; e++) {
     PetscInt edge_id       = edges->internal_edge_ids[e];
     PetscInt left_cell_id  = edges->cell_ids[2 * edge_id];
     PetscInt right_cell_id = edges->cell_ids[2 * edge_id + 1];
 
+    // Store edge geometry (unit normal components)
     interior_flux_op->edges.cn[e] = edges->cn[edge_id];
     interior_flux_op->edges.sn[e] = edges->sn[edge_id];
 
     if (left_cell_id < 0 || right_cell_id < 0) continue;
 
-    // centroid geom for gradients
-    PetscReal dx[2];
+    // Compute dx = xR - xL from cell centroids
     RDyPoint cL = cells->centroids[left_cell_id];
     RDyPoint cR = cells->centroids[right_cell_id];
+    PetscReal dx[2] = {cR.X[0] - cL.X[0], cR.X[1] - cL.X[1]};
 
-    dx[0] = cR.X[0] - cL.X[0];
-    dx[1] = cR.X[1] - cL.X[1];
+    // Compute normalized directional weights
+    PetscReal grad_weights[2];
+    PetscCall(PetscFVComputeGradient(fvm, 1, dx, grad_weights));
 
-
-    //compute gradients for each component
-    for (PetscInt c = 0; c < num_comp; ++c) {
-      PetscScalar grad[2];
-      PetscCall(PetscFVComputeGradient_LeastSquares(fvm, 1, dx, grad));
-      for (PetscInt d = 0; d < dim; d++) {
-        interior_flux_op->grad_qL[(e * dim + d) * num_comp + c] = grad[d];
-        interior_flux_op->grad_qR[(e * dim + d) * num_comp + c] = -grad[d];
-
-      }
+    // store weights
+    for (PetscInt d = 0; d < dim; ++d) {
+      interior_flux_op->grad_qL[e * dim + d] = grad_weights[d];
+      interior_flux_op->grad_qR[e * dim + d] = -grad_weights[d];
     }
   }
-  //NEED TO MODIFY THIS WITH OTHER RECONSTRUCTED FUNCTION
-  PetscCall(PetscOperatorCreate(interior_flux_op, ApplyInteriorFluxReconstructed, DestroyInteriorFluxReconstructed, petsc_op));
 
+  PetscCall(PetscOperatorCreate(interior_flux_op, ApplyInteriorFluxReconstructed, DestroyInteriorFluxReconstructed, petsc_op));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
+
 
 //------------------------
 // Boundary Flux Operator
