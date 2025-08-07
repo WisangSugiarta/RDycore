@@ -110,8 +110,6 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructed(void *ctx, CeedInt Q, const CeedS
   const CeedScalar gravity = context->gravity;
 
   for (CeedInt i = 0; i < Q; i++) {
-    //SWEState   qL = {q_L[0][i], q_L[1][i], q_L[2][i]};
-    //SWEState   qR = {q_R[0][i], q_R[1][i], q_R[2][i]};
 
     const CeedScalar dxL[2] = {-geom[0][i], -geom[1][i]};  
     const CeedScalar dxR[2] = { geom[0][i],  geom[1][i]}; 

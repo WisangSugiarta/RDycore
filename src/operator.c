@@ -218,7 +218,6 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
       PetscCall(PetscLogEventRegister("CeedOperatorApp", RDY_CLASSID, &RDY_CeedOperatorApply_));
       first_time = PETSC_FALSE;
     }
-
     PetscCall(CreateCeedFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                      (*operator)->boundary_conditions, &(*operator)->ceed.flux));
     PetscCall(CreateCeedSourceOperator((*operator)->config, (*operator)->mesh, &(*operator)->ceed.source));

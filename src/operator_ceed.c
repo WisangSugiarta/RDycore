@@ -123,7 +123,7 @@ static PetscErrorCode CreateCeedInteriorFluxOperator(const RDyConfig config, RDy
   RDyEdges *edges = &mesh->edges;
 
   CeedQFunction qf;
-  if (1) {
+  if (0) {
     PetscCallCEED(CeedQFunctionCreateInterior(ceed, 1, SWEFluxReconstructed_Roe, SWEFluxReconstructed_Roe_loc, &qf));
   } else {
     PetscCall(CreateInteriorFluxQFunction(ceed, config, &qf));

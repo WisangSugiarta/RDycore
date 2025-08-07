@@ -7,6 +7,7 @@
 #include <private/rdylogimpl.h>
 #include <private/rdymmsconfigimpl.h>
 #include <rdycore.h>
+#include "petscsystypes.h"
 
 // The types in this file ѕerve as an intermediate representation for our input
 // configuration file:
@@ -104,6 +105,7 @@ typedef struct {
   RDyNumericsSpatial  spatial;
   RDyNumericsTemporal temporal;
   RDyNumericsRiemann  riemann;
+  PetscBool          slope_reconstruction;
 } RDyNumericsSection;
 
 // ------------

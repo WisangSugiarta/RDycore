@@ -123,6 +123,7 @@ static const cyaml_schema_field_t numerics_fields_schema[] = {
     CYAML_FIELD_ENUM("spatial", CYAML_FLAG_DEFAULT, RDyNumericsSection, spatial, numerics_spatial_types, CYAML_ARRAY_LEN(numerics_spatial_types)),
     CYAML_FIELD_ENUM("temporal", CYAML_FLAG_DEFAULT, RDyNumericsSection, temporal, numerics_temporal_types, CYAML_ARRAY_LEN(numerics_temporal_types)),
     CYAML_FIELD_ENUM("riemann", CYAML_FLAG_DEFAULT, RDyNumericsSection, riemann, numerics_riemann_types, CYAML_ARRAY_LEN(numerics_riemann_types)),
+    CYAML_FIELD_BOOL("slope_reconstruction", CYAML_FLAG_OPTIONAL, RDyNumericsSection, slope_reconstruction),
     CYAML_FIELD_END
 };
 
