@@ -9,6 +9,7 @@
 #include <private/rdymeshimpl.h>
 #include <private/rdyregionimpl.h>
 #include <rdycore.h>  // for MAX_NAME_LEN
+#include "petscdmtypes.h"
 
 //--------------------------------
 // Maximum Wave Speed Diagnostics
@@ -186,7 +187,7 @@ PETSC_INTERN PetscErrorCode ApplyOperator(Operator *, PetscReal, Vec, Vec);
 PETSC_INTERN PetscErrorCode CreateCeedFluxOperator(RDyConfig *, RDyMesh *, PetscInt, RDyBoundary *, RDyCondition *, CeedOperator *);
 PETSC_INTERN PetscErrorCode CreateCeedSourceOperator(RDyConfig *, RDyMesh *, CeedOperator *);
 PETSC_INTERN PetscErrorCode CreatePetscFluxOperator(RDyConfig *, RDyMesh *, PetscInt, RDyBoundary *, RDyCondition *, Vec *, Vec *,
-                                                    OperatorDiagnostics *, PetscOperator *);
+                                                    OperatorDiagnostics *, PetscOperator *, DM *);
 PETSC_INTERN PetscErrorCode CreatePetscSourceOperator(RDyConfig *, RDyMesh *, Vec, Vec, PetscOperator *);
 
 //----------------------

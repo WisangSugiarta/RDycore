@@ -177,7 +177,7 @@ PetscErrorCode PetscOperatorSetField(PetscOperator op, const char *name, Vec vec
 /// @return 0 on success, or a non-zero error code on failure
 PetscErrorCode CreatePetscFluxOperator(RDyConfig *config, RDyMesh *mesh, PetscInt num_boundaries, RDyBoundary *boundaries,
                                        RDyCondition *boundary_conditions, Vec *boundary_values, Vec *boundary_fluxes,
-                                       OperatorDiagnostics *diagnostics, PetscOperator *flux_op) {
+                                       OperatorDiagnostics *diagnostics, PetscOperator *flux_op, DM *domain_dm) {
   PetscFunctionBegin;
 
   PetscCall(PetscCompositeOperatorCreate(flux_op));
@@ -189,11 +189,20 @@ PetscErrorCode CreatePetscFluxOperator(RDyConfig *config, RDyMesh *mesh, PetscIn
   // flux suboperator 0: fluxes between interior cells
 
   PetscOperator interior_flux_op;
-  if (config->physics.sediment.num_classes > 0) {
-    PetscCall(CreateSedimentPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
+  if (config->numerics.slope_reconstruction) {//this is the reconstructed version if - will change later
+    if (config->physics.sediment.num_classes > 0) {
+      PetscCall(CreateSedimentPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
+    } else {
+      PetscCall(CreateSWEPetscInteriorFluxOperatorReconstructed(mesh, *config, diagnostics, domain_dm, &interior_flux_op));
+    }
   } else {
-    PetscCall(CreateSWEPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
+    if (config->physics.sediment.num_classes > 0) {
+      PetscCall(CreateSedimentPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
+    } else {
+      PetscCall(CreateSWEPetscInteriorFluxOperator(mesh, *config, diagnostics, &interior_flux_op));
+    }
   }
+
   PetscCall(PetscCompositeOperatorAddSub(*flux_op, interior_flux_op));
 
   // flux suboperators 1 to num_boundaries: fluxes on boundary edges
