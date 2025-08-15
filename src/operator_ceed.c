@@ -69,6 +69,28 @@ static PetscErrorCode CreateInteriorFluxQFunction(Ceed ceed, const RDyConfig con
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode CreateInteriorFluxReconstructedQFunction(Ceed ceed, const RDyConfig config, CeedQFunction *qf) {
+  PetscFunctionBeginUser;
+
+  CeedInt num_sediment_comp = config.physics.sediment.num_classes;
+
+  CeedQFunctionContext qf_context;
+  if (num_sediment_comp == 0) {  // flow only, and SWE is it!
+    PetscCallCEED(CeedQFunctionCreateInterior(ceed, 1, SWEFluxReconstructed_Roe, SWEFluxReconstructed_Roe_loc, qf));
+    PetscCall(CreateSWEQFunctionContext(ceed, config, &qf_context));
+  } else {
+    PetscCallCEED(CeedQFunctionCreateInterior(ceed, 1, SedimentFlux_Roe, SedimentFlux_Roe_loc, qf));
+    PetscCall(CreateSedimentQFunctionContext(ceed, config, &qf_context));
+  }
+
+  // add the context to the Q function
+  if (0) PetscCallCEED(CeedQFunctionContextView(qf_context, stdout));
+  PetscCallCEED(CeedQFunctionSetContext(*qf, qf_context));
+  PetscCallCEED(CeedQFunctionContextDestroy(&qf_context));
+
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 /// @brief Creates a CEED operator for solving governing equations by computing
 /// fluxes on interior edges
 /// Creates a CeedOperator that computes fluxes between pairs of cells on the
@@ -279,6 +301,149 @@ static PetscErrorCode CreateBoundaryFluxQFunction(Ceed ceed, const RDyConfig con
   PetscCallCEED(CeedQFunctionContextDestroy(&qf_context));
 
   PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CreateCeedInteriorFluxOperatorReconstructed(const RDyConfig config, RDyMesh *mesh, CeedOperator *ceed_op) {
+  PetscFunctionBeginUser;
+
+  Ceed ceed = CeedContext();
+
+  CeedInt num_sediment_comp = config.physics.sediment.num_classes;
+  CeedInt num_flow_comp     = 3;  // NOTE: SWE assumed!
+  CeedInt num_comp          = num_flow_comp + num_sediment_comp;
+
+  RDyCells *cells = &mesh->cells;
+  RDyEdges *edges = &mesh->edges;
+
+  CeedQFunction qf;
+  PetscCall(CreateInteriorFluxReconstructedQFunction(ceed, config, &qf));
+
+  // add inputs and outputs
+  // NOTE: the order in which these inputs and outputs are specified determines
+  // NOTE: their indexing within the Q-function's implementation (swe_ceed_impl.h)
+  CeedInt num_comp_geom = 4, num_comp_cnum = 2;
+  PetscCallCEED(CeedQFunctionAddInput(qf, "geom", num_comp_geom, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddInput(qf, "q_left", num_comp, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddInput(qf, "q_right", num_comp, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddOutput(qf, "cell_left", num_comp, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddOutput(qf, "cell_right", num_comp, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddOutput(qf, "flux", num_comp, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddOutput(qf, "courant_number", num_comp_cnum, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddInput(qf, "grad_q_left", 6, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddInput(qf, "grad_q_right", 6, CEED_EVAL_NONE));
+
+  // create vectors (and their supporting restrictions) for the operator
+  CeedElemRestriction q_restrict_l, q_restrict_r, c_restrict_l, c_restrict_r, restrict_geom, restrict_flux, restrict_cnum,restrict_grad_qL, restrict_grad_qR;
+  CeedVector          geom, flux, cnum, grad_qL_vec, grad_qR_vec;
+
+  CeedInt grad_stride[3] = {6, 1, 6};  // 6 = 3 variables × 2D
+  CeedInt num_edges = mesh->num_owned_internal_edges;
+
+  PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, 6, 6 * num_edges, grad_stride, &restrict_grad_qL));
+  PetscCallCEED(CeedElemRestrictionCreateVector(restrict_grad_qL, &grad_qL_vec, NULL));
+  PetscCallCEED(CeedVectorSetValue(grad_qL_vec, 0.0));
+
+  PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, 6, 6 * num_edges, grad_stride, &restrict_grad_qR));
+  PetscCallCEED(CeedElemRestrictionCreateVector(restrict_grad_qR, &grad_qR_vec, NULL));
+  PetscCallCEED(CeedVectorSetValue(grad_qR_vec, 0.0));
+
+  {
+    CeedInt num_edges = mesh->num_owned_internal_edges;
+
+    // create a vector of geometric factors that transform fluxes to cell states
+    CeedInt g_strides[] = {num_comp_geom, 1, num_comp_geom};
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, num_comp_geom, num_edges * num_comp_geom, g_strides, &restrict_geom));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_geom, &geom, NULL));
+    PetscCallCEED(CeedVectorSetValue(geom, 0.0));
+    CeedScalar(*g)[4];
+    PetscCallCEED(CeedVectorGetArray(geom, CEED_MEM_HOST, (CeedScalar **)&g));
+    for (CeedInt e = 0, owned_edge = 0; e < mesh->num_internal_edges; e++) {
+      CeedInt iedge = edges->internal_edge_ids[e];
+      if (!edges->is_owned[iedge]) continue;
+      CeedInt l        = edges->cell_ids[2 * iedge];
+      CeedInt r        = edges->cell_ids[2 * iedge + 1];
+      g[owned_edge][0] = edges->sn[iedge];
+      g[owned_edge][1] = edges->cn[iedge];
+      g[owned_edge][2] = -edges->lengths[iedge] / cells->areas[l];
+      g[owned_edge][3] = edges->lengths[iedge] / cells->areas[r];
+      owned_edge++;
+    }
+    PetscCallCEED(CeedVectorRestoreArray(geom, (CeedScalar **)&g));
+
+    // create a vector to store inter-cell fluxes
+    CeedInt f_strides[] = {num_comp, 1, num_comp};
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, num_comp, num_edges * num_comp, f_strides, &restrict_flux));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_flux, &flux, NULL));
+    PetscCallCEED(CeedVectorSetValue(flux, 0.0));
+
+    // create a vector to store the courant number for each edge
+    CeedInt cnum_strides[] = {num_comp_cnum, 1, num_comp_cnum};
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, num_comp_cnum, num_edges * num_comp_cnum, cnum_strides, &restrict_cnum));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_cnum, &cnum, NULL));
+    PetscCallCEED(CeedVectorSetValue(cnum, 0.0));
+
+    // create element restrictions for (active) left and right input/output states
+    CeedInt *q_offset_l, *q_offset_r, *c_offset_l, *c_offset_r;
+    PetscCall(PetscMalloc2(num_edges, &q_offset_l, num_edges, &q_offset_r));
+    PetscCall(PetscMalloc2(num_edges, &c_offset_l, num_edges, &c_offset_r));
+    for (CeedInt e = 0, owned_edge = 0; e < mesh->num_internal_edges; e++) {
+      CeedInt iedge = edges->internal_edge_ids[e];
+      if (!edges->is_owned[iedge]) continue;
+      CeedInt l              = edges->cell_ids[2 * iedge];
+      CeedInt r              = edges->cell_ids[2 * iedge + 1];
+      q_offset_l[owned_edge] = l * num_comp;
+      q_offset_r[owned_edge] = r * num_comp;
+      c_offset_l[owned_edge] = cells->local_to_owned[l] * num_comp;
+      c_offset_r[owned_edge] = cells->local_to_owned[r] * num_comp;
+      owned_edge++;
+    }
+    PetscCallCEED(CeedElemRestrictionCreate(ceed, num_edges, 1, num_comp, 1, mesh->num_cells * num_comp, CEED_MEM_HOST, CEED_COPY_VALUES, q_offset_l,
+                                            &q_restrict_l));
+    PetscCallCEED(CeedElemRestrictionCreate(ceed, num_edges, 1, num_comp, 1, mesh->num_cells * num_comp, CEED_MEM_HOST, CEED_COPY_VALUES, q_offset_r,
+                                            &q_restrict_r));
+    PetscCallCEED(CeedElemRestrictionCreate(ceed, num_edges, 1, num_comp, 1, mesh->num_cells * num_comp, CEED_MEM_HOST, CEED_COPY_VALUES, c_offset_l,
+                                            &c_restrict_l));
+    PetscCallCEED(CeedElemRestrictionCreate(ceed, num_edges, 1, num_comp, 1, mesh->num_cells * num_comp, CEED_MEM_HOST, CEED_COPY_VALUES, c_offset_r,
+                                            &c_restrict_r));
+    PetscCall(PetscFree2(q_offset_l, q_offset_r));
+    PetscCall(PetscFree2(c_offset_l, c_offset_r));
+    if (0) {
+      PetscCallCEED(CeedElemRestrictionView(q_restrict_l, stdout));
+      PetscCallCEED(CeedElemRestrictionView(q_restrict_r, stdout));
+      PetscCallCEED(CeedElemRestrictionView(c_restrict_l, stdout));
+      PetscCallCEED(CeedElemRestrictionView(c_restrict_r, stdout));
+    }
+  }
+
+  // create the operator itself and assign its active/passive inputs/outputs
+  PetscCallCEED(CeedOperatorCreate(ceed, qf, NULL, NULL, ceed_op));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "geom", restrict_geom, CEED_BASIS_COLLOCATED, geom));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "q_left", q_restrict_l, CEED_BASIS_COLLOCATED, CEED_VECTOR_ACTIVE));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "q_right", q_restrict_r, CEED_BASIS_COLLOCATED, CEED_VECTOR_ACTIVE));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "cell_left", c_restrict_l, CEED_BASIS_COLLOCATED, CEED_VECTOR_ACTIVE));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "cell_right", c_restrict_r, CEED_BASIS_COLLOCATED, CEED_VECTOR_ACTIVE));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "flux", restrict_flux, CEED_BASIS_COLLOCATED, flux));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "courant_number", restrict_cnum, CEED_BASIS_COLLOCATED, cnum));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "grad_q_left", restrict_grad_qL, CEED_BASIS_COLLOCATED, grad_qL_vec));
+    PetscCallCEED(CeedOperatorSetField(*ceed_op, "grad_q_right", restrict_grad_qR, CEED_BASIS_COLLOCATED, grad_qR_vec));
+  // clean up
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_geom));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_flux));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_cnum));
+  PetscCallCEED(CeedElemRestrictionDestroy(&q_restrict_l));
+  PetscCallCEED(CeedElemRestrictionDestroy(&q_restrict_r));
+  PetscCallCEED(CeedElemRestrictionDestroy(&c_restrict_l));
+  PetscCallCEED(CeedElemRestrictionDestroy(&c_restrict_r));
+  PetscCallCEED(CeedVectorDestroy(&geom));
+  PetscCallCEED(CeedVectorDestroy(&flux));
+  PetscCallCEED(CeedVectorDestroy(&cnum));
+  PetscCallCEED(CeedQFunctionDestroy(&qf));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_grad_qL));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_grad_qR));
+  PetscCallCEED(CeedVectorDestroy(&grad_qL_vec));
+  PetscCallCEED(CeedVectorDestroy(&grad_qR_vec));
+
+  PetscFunctionReturn(CEED_ERROR_SUCCESS);
 }
 
 /// @brief Creates a CEED operator that computes fluxes through edges on the boundary of a domain.
@@ -494,6 +659,37 @@ PetscErrorCode CreateCeedFluxOperator(RDyConfig *config, RDyMesh *mesh, PetscInt
   }
   PetscFunctionReturn(PETSC_SUCCESS);
 }
+
+PetscErrorCode CreateCeedFluxReconstructedOperator(RDyConfig *config, RDyMesh *mesh, PetscInt num_boundaries, RDyBoundary *boundaries,
+                                      RDyCondition *boundary_conditions, CeedOperator *flux_op) {
+  PetscFunctionBegin;
+
+  Ceed ceed = CeedContext();
+
+  PetscCall(CeedCompositeOperatorCreate(ceed, flux_op));
+
+  if (config->physics.flow.mode != FLOW_SWE) {
+    PetscCheck(PETSC_FALSE, PETSC_COMM_WORLD, PETSC_ERR_USER, "SWE is the only supported flow model!");
+  }
+
+  // flux suboperator 0: fluxes between interior cells
+
+  CeedOperator interior_flux_op;
+  PetscCall(CreateCeedInteriorFluxOperatorReconstructed(*config, mesh, &interior_flux_op));
+  PetscCall(CeedCompositeOperatorAddSub(*flux_op, interior_flux_op));
+
+  // flux suboperators 1 to num_boundaries: fluxes on boundary edges
+  for (CeedInt b = 0; b < num_boundaries; ++b) {
+    CeedOperator boundary_flux_op;
+    RDyBoundary  boundary  = boundaries[b];
+    RDyCondition condition = boundary_conditions[b];
+    PetscCall(CreateCeedBoundaryFluxOperator(*config, mesh, boundary, condition, &boundary_flux_op));
+    PetscCall(CeedCompositeOperatorAddSub(*flux_op, boundary_flux_op));
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+
 
 static PetscErrorCode CreateSourceQFunction(Ceed ceed, const RDyConfig config, CeedQFunction *qf) {
   PetscFunctionBeginUser;

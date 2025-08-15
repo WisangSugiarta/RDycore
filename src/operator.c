@@ -138,6 +138,8 @@ static PetscErrorCode AddOperatorFluxDivergence(Operator *op) {
   PetscCall(DMCreateGlobalVector(op->dm, &op->flux_divergence));
   PetscCall(VecZeroEntries(op->flux_divergence));
 
+
+
   if (CeedEnabled()) {
     Ceed    ceed               = CeedContext();
     CeedInt num_comp           = op->num_components;
@@ -187,6 +189,13 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
   MPI_Comm comm;
   PetscCall(PetscObjectGetComm((PetscObject)domain_dm, &comm));
 
+  PetscBool use_slope_reconstruction = PETSC_FALSE;
+  PetscOptionsBegin(comm, NULL, "RDycore Operator Options", "");
+  PetscOptionsBool("-use_slope_reconstruction",
+                   "Enable PETSc-based slope reconstruction in flux operator",
+                   "", PETSC_FALSE, &use_slope_reconstruction, NULL);
+  PetscOptionsEnd();
+
   // check our arguments
   PetscCheck(domain_mesh, comm, PETSC_ERR_USER, "Cannot create an operator with no mesh");
   PetscCheck(num_regions > 0, comm, PETSC_ERR_USER, "Cannot create an operator with no regions");
@@ -216,9 +225,15 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
       PetscCall(PetscLogEventRegister("CeedOperatorApp", RDY_CLASSID, &RDY_CeedOperatorApply_));
       first_time = PETSC_FALSE;
     }
-
-    PetscCall(CreateCeedFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
+    if (use_slope_reconstruction) {
+      PetscCall(CreateCeedFluxReconstructedOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                      (*operator)->boundary_conditions, &(*operator)->ceed.flux));
+    } else {
+      PetscCall(CreateCeedFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
+                                     (*operator)->boundary_conditions, &(*operator)->ceed.flux));
+    }
+
+    
     PetscCall(CreateCeedSourceOperator((*operator)->config, (*operator)->mesh, &(*operator)->ceed.source));
   } else {
     PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
