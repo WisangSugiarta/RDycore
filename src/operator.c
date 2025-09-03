@@ -207,8 +207,11 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
   // (e.g. sequential vectors for PETSc operator)
   PetscCall(SetOperatorRegions(*operator, num_regions, regions));
 
-  // ** TESTING: Force slope reconstruction on **
-  config->numerics.use_slope_reconstruction = PETSC_TRUE;
+  PetscBool use_slope_reconstruction = PETSC_FALSE;
+  PetscCall(PetscOptionsGetBool(NULL, NULL, "-use_slope_reconstruction", &use_slope_reconstruction, NULL));
+  config->numerics.use_slope_reconstruction = use_slope_reconstruction;  // Add this line
+
+// ... then later you can use config->numerics.use_slope_reconstruction as you have it
 
   // construct CEED or PETSc versions of the flux/sources operators based on
   // our configuration
@@ -226,10 +229,12 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
   } else {
     // Check the slope reconstruction flag **
     if (config->numerics.use_slope_reconstruction) {
+      printf("DEBUG: Using slope reconstruction\n");
       PetscCall(CreatePetscFluxOperatorReconstructed((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                         (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
                                         &(*operator)->diagnostics, &(*operator)->petsc.flux));
     } else {
+      printf("DEBUG: NOT Using slope reconstruction\n");
       PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                         (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
                                         &(*operator)->diagnostics, &(*operator)->petsc.flux));
