@@ -205,6 +205,12 @@ static PetscErrorCode DestroyInteriorFlux(void *context) {
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscReal MinModLimiter(PetscReal a, PetscReal b) {
+  if (a * b <= 0.0) return 0.0;  // Different signs or zero
+  if (PetscAbs(a) < PetscAbs(b)) return a;
+  else return b;
+}
+
 // Alternative applyinterior function with slope reconstruction
 static PetscErrorCode ApplyInteriorFluxReconstructed(void *context, PetscOperatorFields fields,
                                                      PetscReal dt, Vec u_local, Vec f_global) {
@@ -219,7 +225,6 @@ static PetscErrorCode ApplyInteriorFluxReconstructed(void *context, PetscOperato
   RDyEdges             *edges            = &mesh->edges;
 
   const PetscInt num_comp = 3;
-  const PetscInt dim      = 2;
 
   // Get pointers to vector data
   PetscScalar *u_ptr, *f_ptr;
@@ -241,7 +246,7 @@ static PetscErrorCode ApplyInteriorFluxReconstructed(void *context, PetscOperato
   RDyPoint *centroids = cells->centroids;
   PetscInt   num_edges = mesh->num_internal_edges;
 
-  // STEP 2: Reconstruct values at edge locations (THIS IS THE KEY CHANGE)
+  // STEP 2: Reconstruct values at edge locations with slope limiting
   for (PetscInt e = 0; e < num_edges; ++e) {
     PetscInt edge_id  = edges->internal_edge_ids[e];
     PetscInt left_id  = edges->cell_ids[2 * edge_id];
@@ -249,43 +254,144 @@ static PetscErrorCode ApplyInteriorFluxReconstructed(void *context, PetscOperato
 
     if (left_id < 0 || right_id < 0) continue;
 
-    // Compute midpoint between left and right centroids (same as your original)
+    // Compute midpoint between left and right centroids
     PetscReal midpoint[2];
     midpoint[0] = 0.5 * (centroids[left_id].X[0] + centroids[right_id].X[0]);
     midpoint[1] = 0.5 * (centroids[left_id].X[1] + centroids[right_id].X[1]);
 
-    // Displacement from centroids to midpoint (same as your original)
+    // Displacement from centroids to midpoint
     PetscReal dxL[2], dxR[2];
     dxL[0] = midpoint[0] - centroids[left_id].X[0];
     dxL[1] = midpoint[1] - centroids[left_id].X[1];
     dxR[0] = midpoint[0] - centroids[right_id].X[0];
     dxR[1] = midpoint[1] - centroids[right_id].X[1];
 
-    // ** NEW: Compute geometric weights for gradient calculation **
+    // Compute geometric weights for gradient calculation
     PetscReal dx_cell[2];
     dx_cell[0] = centroids[right_id].X[0] - centroids[left_id].X[0];
     dx_cell[1] = centroids[right_id].X[1] - centroids[left_id].X[1];
     PetscReal dist_sq = dx_cell[0]*dx_cell[0] + dx_cell[1]*dx_cell[1];
     
     PetscReal grad_weights[2];
-    grad_weights[0] = dx_cell[0] / dist_sq;  // geometric weight for x-gradient
-    grad_weights[1] = dx_cell[1] / dist_sq;  // geometric weight for y-gradient
+    grad_weights[0] = dx_cell[0] / dist_sq;
+    grad_weights[1] = dx_cell[1] / dist_sq;
 
-    // Reconstruct each component separately
+    // Collect neighbor information for slope limiting
+    PetscReal neighbor_values[3][4];  // [component][neighbor: left-left, left, right, right-right]
+    PetscInt neighbor_count[2] = {0, 0};  // count of valid neighbors for left and right cells
+    
+    // Find additional neighbors for slope limiting
+    // For left cell, find another neighbor
+    for (PetscInt ee = 0; ee < mesh->num_internal_edges; ++ee) {
+      if (ee == e) continue;
+      PetscInt other_edge_id = edges->internal_edge_ids[ee];
+      PetscInt cell1 = edges->cell_ids[2 * other_edge_id];
+      PetscInt cell2 = edges->cell_ids[2 * other_edge_id + 1];
+      
+      if (cell1 == left_id && cell2 >= 0 && cell2 != right_id) {
+        // Found left neighbor for left cell
+        for (PetscInt c = 0; c < 3; ++c) {
+          neighbor_values[c][0] = u_ptr[n_dof * cell2 + c];  // left-left neighbor
+        }
+        neighbor_count[0] = 1;
+        break;
+      } else if (cell2 == left_id && cell1 >= 0 && cell1 != right_id) {
+        // Found left neighbor for left cell
+        for (PetscInt c = 0; c < 3; ++c) {
+          neighbor_values[c][0] = u_ptr[n_dof * cell1 + c];  // left-left neighbor  
+        }
+        neighbor_count[0] = 1;
+        break;
+      }
+    }
+    
+    // For right cell, find another neighbor  
+    for (PetscInt ee = 0; ee < mesh->num_internal_edges; ++ee) {
+      if (ee == e) continue;
+      PetscInt other_edge_id = edges->internal_edge_ids[ee];
+      PetscInt cell1 = edges->cell_ids[2 * other_edge_id];
+      PetscInt cell2 = edges->cell_ids[2 * other_edge_id + 1];
+      
+      if (cell1 == right_id && cell2 >= 0 && cell2 != left_id) {
+        // Found right neighbor for right cell
+        for (PetscInt c = 0; c < 3; ++c) {
+          neighbor_values[c][3] = u_ptr[n_dof * cell2 + c];  // right-right neighbor
+        }
+        neighbor_count[1] = 1;
+        break;
+      } else if (cell2 == right_id && cell1 >= 0 && cell1 != left_id) {
+        // Found right neighbor for right cell
+        for (PetscInt c = 0; c < 3; ++c) {
+          neighbor_values[c][3] = u_ptr[n_dof * cell1 + c];  // right-right neighbor
+        }
+        neighbor_count[1] = 1;
+        break;
+      }
+    }
+
+    // Reconstruct each component with slope limiting
     for (PetscInt c = 0; c < num_comp; c++) {
       // Get cell-centered values for this component
       PetscScalar qL = u_ptr[n_dof * left_id + c];
       PetscScalar qR = u_ptr[n_dof * right_id + c];
 
-      // ** NEW: Compute actual gradient from solution values **
-      PetscReal dq = qR - qL;  // solution difference
-      PetscReal grad[2];
-      grad[0] = dq * grad_weights[0];  // actual gradient in x-direction
-      grad[1] = dq * grad_weights[1];  // actual gradient in y-direction
+      // Store current values
+      neighbor_values[c][1] = qL;  // left cell
+      neighbor_values[c][2] = qR;  // right cell
 
-      // ** NEW: Reconstruct values at midpoint using gradient **
-      PetscScalar qL_rec = qL + grad[0] * dxL[0] + grad[1] * dxL[1];
-      PetscScalar qR_rec = qR + grad[0] * dxR[0] + grad[1] * dxR[1];
+      // Compute unlimited gradient from solution values
+      PetscReal dq = qR - qL;
+      PetscReal grad_unlimited[2];
+      grad_unlimited[0] = dq * grad_weights[0];
+      grad_unlimited[1] = dq * grad_weights[1];
+
+      // Apply slope limiting
+      PetscReal grad_limited[2];
+      
+      if (neighbor_count[0] > 0 && neighbor_count[1] > 0) {
+        // We have enough neighbors for full MUSCL limiting
+        PetscReal dq_left = qL - neighbor_values[c][0];   // qL - qLL  
+        PetscReal dq_right = neighbor_values[c][3] - qR;  // qRR - qR
+        
+        // Apply MinMod limiter in the direction of the edge
+        PetscReal edge_direction[2];
+        PetscReal edge_length = sqrt(dx_cell[0]*dx_cell[0] + dx_cell[1]*dx_cell[1]);
+        edge_direction[0] = dx_cell[0] / edge_length;
+        edge_direction[1] = dx_cell[1] / edge_length;
+        
+        // Project gradients onto edge direction
+        PetscReal grad_edge_unlimited = grad_unlimited[0] * edge_direction[0] + grad_unlimited[1] * edge_direction[1];
+        PetscReal grad_edge_left = dq_left * grad_weights[0] * edge_direction[0] + dq_left * grad_weights[1] * edge_direction[1];
+        PetscReal grad_edge_right = dq_right * grad_weights[0] * edge_direction[0] + dq_right * grad_weights[1] * edge_direction[1];
+        
+        // Apply MinMod limiter
+        PetscReal grad_limited_edge = MinModLimiter(grad_edge_unlimited, 
+                                       MinModLimiter(2.0 * grad_edge_left, 2.0 * grad_edge_right));
+        
+        // Convert back to x,y components
+        PetscReal limiter_factor = (PetscAbs(grad_edge_unlimited) > 1e-12) ? 
+                                   grad_limited_edge / grad_edge_unlimited : 1.0;
+        
+        grad_limited[0] = limiter_factor * grad_unlimited[0];
+        grad_limited[1] = limiter_factor * grad_unlimited[1];
+      } else {
+        // Fall back to simpler limiting - just reduce gradient magnitude
+        PetscReal max_variation = PetscMax(PetscAbs(dq), 1e-12);
+        PetscReal grad_magnitude = sqrt(grad_unlimited[0]*grad_unlimited[0] + grad_unlimited[1]*grad_unlimited[1]);
+        
+        if (grad_magnitude > 2.0 * max_variation / (0.5 * sqrt(dist_sq))) {
+          PetscReal reduction_factor = 2.0 * max_variation / (grad_magnitude * 0.5 * sqrt(dist_sq));
+          grad_limited[0] = reduction_factor * grad_unlimited[0];
+          grad_limited[1] = reduction_factor * grad_unlimited[1];
+        } else {
+          grad_limited[0] = grad_unlimited[0];
+          grad_limited[1] = grad_unlimited[1];
+        }
+      }
+
+      // Reconstruct values at midpoint using limited gradients
+      PetscScalar qL_rec = qL + grad_limited[0] * dxL[0] + grad_limited[1] * dxL[1];
+      PetscScalar qR_rec = qR + grad_limited[0] * dxR[0] + grad_limited[1] * dxR[1];
 
       // Store reconstructed values in Riemann data structures
       if (c == 0) {        // h (water height)
