@@ -239,15 +239,9 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
     PetscCall(CreateCeedSourceOperator((*operator)->config, (*operator)->mesh, &(*operator)->ceed.source));
   } else {
     // PETSc path with slope reconstruction support
-    if (use_slope_reconstruction) {
-      PetscCall(CreatePetscFluxOperatorReconstructed((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
+   PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                         (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
                                         &(*operator)->diagnostics, &(*operator)->petsc.flux));
-    } else {
-      PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
-                                        (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
-                                        &(*operator)->diagnostics, &(*operator)->petsc.flux));
-    }
     
     PetscCall(CreatePetscSourceOperator((*operator)->config, (*operator)->mesh, (*operator)->petsc.external_sources,
                                         (*operator)->petsc.material_properties, &(*operator)->petsc.source));

@@ -103,7 +103,6 @@ CEED_QFUNCTION_HELPER CeedScalar MinModLimiter_CEED(CeedScalar a, CeedScalar b) 
   return (fabs(a) < fabs(b)) ? a : b;
 }
 
-// Complete slope-limited reconstruction QFunction
 CEED_QFUNCTION_HELPER int SWEFluxReconstructed(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[], RiemannFluxType flux_type) {
   // Inputs (must match the QFunction field order exactly)
   const CeedScalar(*geom)[CEED_Q_VLA]           = (const CeedScalar(*)[CEED_Q_VLA])in[0];  // geom
@@ -136,9 +135,11 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructed(void *ctx, CeedInt Q, const CeedS
     SWEState qL_center = {q_L[0][i], q_L[1][i], q_L[2][i]};
     SWEState qR_center = {q_R[0][i], q_R[1][i], q_R[2][i]};
 
-    // Get neighbor values for slope limiting - accessing first neighbor of each cell
-    SWEState qL_neighbor = {q_L_neighbors[0][i], q_L_neighbors[1][i], q_L_neighbors[2][i]};  // [h, hu, hv] of left neighbor
-    SWEState qR_neighbor = {q_R_neighbors[3][i], q_R_neighbors[4][i], q_R_neighbors[5][i]};  // [h, hu, hv] of right neighbor
+    // Get neighbor values for slope limiting
+    // Based on your restriction setup: q_offset_l_neighbors[2 * owned_edge] and q_offset_l_neighbors[2 * owned_edge + 1]
+    // Data layout per edge: [left_neighbor_h, left_neighbor_hu, left_neighbor_hv, placeholder_h, placeholder_hu, placeholder_hv]
+    SWEState qL_neighbor = {q_L_neighbors[0][i], q_L_neighbors[1][i], q_L_neighbors[2][i]};  // left cell's neighbor
+    SWEState qR_neighbor = {q_R_neighbors[0][i], q_R_neighbors[1][i], q_R_neighbors[2][i]};  // right cell's neighbor
 
     // Compute geometric weights for gradients (2-point stencil)
     const CeedScalar dx_cell_x = (dxR[0] - dxL[0]);  // x-direction between cell centers
@@ -149,7 +150,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructed(void *ctx, CeedInt Q, const CeedS
     // Reconstruct each component with slope limiting
     SWEState qL_reconstructed, qR_reconstructed;
     
-    // Component h 
+    // Component 0: h (water height)
     {
       const CeedScalar dq = qR_center.h - qL_center.h;
       
@@ -176,7 +177,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructed(void *ctx, CeedInt Q, const CeedS
       qR_reconstructed.h = fmax(0.0, qR_center.h + grad_limited_x * dxR[0] + grad_limited_y * dxR[1]);
     }
     
-    // Component hu
+    // Component 1: hu (x-momentum)  
     {
       const CeedScalar dq = qR_center.hu - qL_center.hu;
       const CeedScalar grad_unlimited[2] = {dq * grad_weight_x, dq * grad_weight_y};
@@ -198,7 +199,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructed(void *ctx, CeedInt Q, const CeedS
       qR_reconstructed.hu = qR_center.hu + grad_limited_x * dxR[0] + grad_limited_y * dxR[1];
     }
     
-    // Component hv 
+    // Component 2: hv (y-momentum)
     {
       const CeedScalar dq = qR_center.hv - qL_center.hv;
       const CeedScalar grad_unlimited[2] = {dq * grad_weight_x, dq * grad_weight_y};
