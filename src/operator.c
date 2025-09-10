@@ -222,18 +222,18 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
     }
     // CEED path with slope reconstruction support
     if (use_slope_reconstruction) {
-      PetscPrintf(comm, "USING RECONSTRUCTION\n");
+      printf("DEBUG: Using slope reconstruction\n");
       PetscCall(CreateCeedFluxOperatorReconstructed((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                      (*operator)->boundary_conditions, &(*operator)->ceed.flux));
     } else {
-      PetscPrintf(comm, "NOT USING RECONSTRUCTION\n");
+      printf("DEBUG: NOT using slope reconstruction\n");
       PetscCall(CreateCeedFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                      (*operator)->boundary_conditions, &(*operator)->ceed.flux));
     }
     PetscCall(CreateCeedSourceOperator((*operator)->config, (*operator)->mesh, &(*operator)->ceed.source));
   } else {
     // PETSc path with slope reconstruction support
-   PetscPrintf(comm, "NOT USING CEED\n");
+   printf("DEBUG: Not using CEED\n");
    PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                         (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
                                         &(*operator)->diagnostics, &(*operator)->petsc.flux));
