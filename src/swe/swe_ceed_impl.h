@@ -97,168 +97,262 @@ CEED_QFUNCTION(SWEFlux_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], 
   return SWEFlux(ctx, Q, in, out, RIEMANN_FLUX_ROE);
 }
 
-// SWE interior flux operator with gradient reconstruction Q-function
-CEED_QFUNCTION_HELPER int SWEFluxReconstruction(void *ctx, CeedInt Q, const CeedScalar *const in[], 
-                                                CeedScalar *const out[], RiemannFluxType flux_type) {
+CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q, 
+                                                     const CeedScalar *const in[], 
+                                                     CeedScalar *const out[]) {
   // Inputs
-  const CeedScalar(*geom)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[0];  // sn, cn, weight_L, weight_R, dx_edge_L, dy_edge_L
-  const CeedScalar(*lsq_L)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[1];  // 2x2 inverse matrix [M00, M01, M10, M11]
-  const CeedScalar(*lsq_R)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[2];  // 2x2 inverse matrix
-  const CeedScalar(*q_L)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[3];    // left cell values [h, hu, hv]
-  const CeedScalar(*q_R)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[4];    // right cell values
-  const CeedScalar(*neighbor_data_L)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[5];  // packed neighbor data
-  const CeedScalar(*neighbor_data_R)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[6];
+  const CeedScalar(*edge_data)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[0];
+  const CeedScalar(*cell_data)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[1];
+  const CeedScalar(*neighbor_coords)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[2];
+  const CeedScalar(*neighbor_values)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[3];
+  const CeedScalar(*q_left)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[4];
+  const CeedScalar(*q_right)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[5];
   
   // Outputs
   CeedScalar(*cell_L)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[0];
   CeedScalar(*cell_R)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[1];
-  CeedScalar(*accum_flux)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[2];
-  CeedScalar(*courant_num)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[3];
-  
+  CeedScalar(*flux)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[2];
+  CeedScalar(*courant)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[3];
+
   const SWEContext context = (SWEContext)ctx;
-  const CeedScalar dt = context->dtime;
-  const CeedScalar tiny_h = context->tiny_h;
-  const CeedScalar h_anuga = context->h_anuga_regular;
   const CeedScalar gravity = context->gravity;
-  
-  const CeedInt num_flow_comp = 3;  // h, hu, hv
-  const CeedInt max_neighbors = 8;
-  
+  const CeedScalar tiny_h = context->tiny_h;
+  const CeedScalar dt = context->dtime;
+  const CeedScalar h_anuga = context->h_anuga_regular;
+
   for (CeedInt i = 0; i < Q; i++) {
     // Extract edge geometry
-    CeedScalar sn = geom[0][i];
-    CeedScalar cn = geom[1][i];
-    CeedScalar weight_L = geom[2][i];
-    CeedScalar weight_R = geom[3][i];
-    CeedScalar dx_edge_L = geom[4][i];
-    CeedScalar dy_edge_L = geom[5][i];
-    // For right cell, edge offset is opposite direction
-    CeedScalar dx_edge_R = -dx_edge_L;
-    CeedScalar dy_edge_R = -dy_edge_L;
+    CeedScalar sn = edge_data[0][i];
+    CeedScalar cn = edge_data[1][i];
+    CeedScalar edge_length = edge_data[2][i];
+    CeedScalar edge_mid_x = edge_data[3][i];
+    CeedScalar edge_mid_y = edge_data[4][i];
     
-    // Initialize reconstructed states with cell center values
-    SWEState qL_reconstructed = {q_L[0][i], q_L[1][i], q_L[2][i]};
-    SWEState qR_reconstructed = {q_R[0][i], q_R[1][i], q_R[2][i]};
+    // Extract cell geometry
+    CeedScalar xl = cell_data[0][i], yl = cell_data[1][i], Al = cell_data[2][i];
+    CeedScalar xr = cell_data[3][i], yr = cell_data[4][i], Ar = cell_data[5][i];
     
-    // Check if we should apply reconstruction (only if cells are wet enough)
-    if (q_L[0][i] > tiny_h) {
-      // Compute gradients for left cell using least squares
-      CeedScalar grad_L[3][2] = {{0}};  // gradients of [h, hu, hv] in [x, y] directions
+    // Get left and right cell solutions
+    CeedScalar qL[3] = {q_left[0][i], q_left[1][i], q_left[2][i]};
+    CeedScalar qR[3] = {q_right[0][i], q_right[1][i], q_right[2][i]};
+    
+    // Initialize reconstructed values with cell center values
+    CeedScalar qL_recon[3] = {qL[0], qL[1], qL[2]};
+    CeedScalar qR_recon[3] = {qR[0], qR[1], qR[2]};
+    
+    // **LEFT CELL RECONSTRUCTION**
+    if (qL[0] > tiny_h) {
+      CeedScalar A[2][2] = {{0}}, b[3][2] = {{0}};
+      CeedInt valid_neighbors = 0;
       
-      // Build RHS vector for each component
-      for (CeedInt comp = 0; comp < num_flow_comp; comp++) {
-        CeedScalar rhs[2] = {0};
+      // Loop through left cell neighbors (first 4 neighbors, coordinates in first 8 components)
+      for (CeedInt n = 0; n < 4; n++) {
+        CeedScalar nx = neighbor_coords[2*n][i];     // x coordinate of neighbor n
+        CeedScalar ny = neighbor_coords[2*n+1][i];   // y coordinate of neighbor n
         
-        // Loop through neighbors
-        for (CeedInt n = 0; n < max_neighbors; n++) {
-          // Extract neighbor data: [h, hu, hv, dx, dy] for each neighbor
-          CeedInt offset = n * (num_flow_comp + 2);
-          CeedScalar dx = neighbor_data_L[offset + num_flow_comp][i];
-          CeedScalar dy = neighbor_data_L[offset + num_flow_comp + 1][i];
+        // Check if this is a valid neighbor (zeros indicate no neighbor)
+        if (nx == 0.0 && ny == 0.0 && n > 0) break;  // First neighbor might be at origin
+        
+        // Get neighbor solution values
+        CeedScalar qN[3] = {
+          neighbor_values[3*n][i],     // h of neighbor n
+          neighbor_values[3*n+1][i],   // hu of neighbor n
+          neighbor_values[3*n+2][i]    // hv of neighbor n
+        };
+        
+        // Distance from left cell center to neighbor center
+        CeedScalar dx = nx - xl;
+        CeedScalar dy = ny - yl;
+        
+        // Only use if neighbor is actually different from center
+        if (fabs(dx) > 1e-12 || fabs(dy) > 1e-12) {
+          // Add to least squares system
+          A[0][0] += dx * dx;
+          A[0][1] += dx * dy;
+          A[1][0] += dy * dx;
+          A[1][1] += dy * dy;
           
-          // Check if this is a valid neighbor (dx=0 and dy=0 marks invalid)
-          if (dx == 0.0 && dy == 0.0 && n > 0) break;
-          
-          // Get neighbor value for this component
-          CeedScalar q_neighbor = neighbor_data_L[offset + comp][i];
-          CeedScalar dq = q_neighbor - q_L[comp][i];
-          
-          rhs[0] += dq * dx;
-          rhs[1] += dq * dy;
+          for (CeedInt comp = 0; comp < 3; comp++) {
+            CeedScalar dq = qN[comp] - qL[comp];
+            b[comp][0] += dq * dx;
+            b[comp][1] += dq * dy;
+          }
+          valid_neighbors++;
         }
-        
-        // Apply inverse LS matrix: grad = M^(-1) * rhs
-        grad_L[comp][0] = lsq_L[0][i] * rhs[0] + lsq_L[1][i] * rhs[1];
-        grad_L[comp][1] = lsq_L[2][i] * rhs[0] + lsq_L[3][i] * rhs[1];
       }
       
-      // Reconstruct values at edge midpoint for left cell
-      qL_reconstructed.h  = q_L[0][i] + grad_L[0][0] * dx_edge_L + grad_L[0][1] * dy_edge_L;
-      qL_reconstructed.hu = q_L[1][i] + grad_L[1][0] * dx_edge_L + grad_L[1][1] * dy_edge_L;
-      qL_reconstructed.hv = q_L[2][i] + grad_L[2][0] * dx_edge_L + grad_L[2][1] * dy_edge_L;
-      
-      // Ensure reconstructed height is non-negative
-      if (qL_reconstructed.h < 0.0) {
-        qL_reconstructed.h = 0.0;
-        qL_reconstructed.hu = 0.0;
-        qL_reconstructed.hv = 0.0;
+      // Solve least squares system and reconstruct (reduced requirement to 1 neighbor for now)
+      if (valid_neighbors >= 1) {
+        CeedScalar det = A[0][0] * A[1][1] - A[0][1] * A[1][0];
+        if (fabs(det) > 1e-12) {
+          CeedScalar inv_A[2][2] = {
+            { A[1][1] / det, -A[0][1] / det},
+            {-A[1][0] / det,  A[0][0] / det}
+          };
+          
+          // Compute gradients and reconstruct at edge midpoint
+          for (CeedInt comp = 0; comp < 3; comp++) {
+            CeedScalar grad_x = inv_A[0][0] * b[comp][0] + inv_A[0][1] * b[comp][1];
+            CeedScalar grad_y = inv_A[1][0] * b[comp][0] + inv_A[1][1] * b[comp][1];
+            
+            CeedScalar dx_edge = edge_mid_x - xl;
+            CeedScalar dy_edge = edge_mid_y - yl;
+            
+            // Reconstruct value at edge midpoint
+            qL_recon[comp] = qL[comp] + grad_x * dx_edge + grad_y * dy_edge;
+          }
+          
+          // Apply MinMod slope limiting
+          for (CeedInt comp = 0; comp < 3; comp++) {
+            CeedScalar delta_recon = qL_recon[comp] - qL[comp];
+            CeedScalar limited_delta = delta_recon;  // Start with unlimited
+            
+            // Check against all valid neighbors for MinMod limiting
+            for (CeedInt n = 0; n < valid_neighbors; n++) {
+              CeedScalar qN = neighbor_values[3*n + comp][i];
+              CeedScalar delta_neighbor = qN - qL[comp];
+              
+              // MinMod limiting: if signs differ, limit to zero
+              if (delta_recon * delta_neighbor <= 0.0) {
+                limited_delta = 0.0;
+                break;
+              } else {
+                // Same signs - take minimum magnitude
+                if (fabs(delta_neighbor) < fabs(limited_delta)) {
+                  limited_delta = delta_neighbor;
+                }
+              }
+            }
+            qL_recon[comp] = qL[comp] + limited_delta;
+          }
+          
+          // Ensure positive depth
+          if (qL_recon[0] < tiny_h) {
+            qL_recon[0] = tiny_h;
+            qL_recon[1] = 0.0;
+            qL_recon[2] = 0.0;
+          }
+        }
       }
     }
     
-    // Similar reconstruction for right cell
-    if (q_R[0][i] > tiny_h) {
-      CeedScalar grad_R[3][2] = {{0}};
+    // **RIGHT CELL RECONSTRUCTION**
+    if (qR[0] > tiny_h) {
+      CeedScalar A[2][2] = {{0}}, b[3][2] = {{0}};
+      CeedInt valid_neighbors = 0;
       
-      for (CeedInt comp = 0; comp < num_flow_comp; comp++) {
-        CeedScalar rhs[2] = {0};
+      // Loop through right cell neighbors (last 4 neighbors, offset by 8 in coords, 12 in values)
+      for (CeedInt n = 0; n < 4; n++) {
+        CeedScalar nx = neighbor_coords[8 + 2*n][i];     // x coordinate of neighbor n
+        CeedScalar ny = neighbor_coords[8 + 2*n+1][i];   // y coordinate of neighbor n
         
-        for (CeedInt n = 0; n < max_neighbors; n++) {
-          CeedInt offset = n * (num_flow_comp + 2);
-          CeedScalar dx = neighbor_data_R[offset + num_flow_comp][i];
-          CeedScalar dy = neighbor_data_R[offset + num_flow_comp + 1][i];
+        if (nx == 0.0 && ny == 0.0 && n > 0) break;
+        
+        CeedScalar qN[3] = {
+          neighbor_values[12 + 3*n][i],     // h of neighbor n
+          neighbor_values[12 + 3*n+1][i],   // hu of neighbor n
+          neighbor_values[12 + 3*n+2][i]    // hv of neighbor n
+        };
+        
+        CeedScalar dx = nx - xr;
+        CeedScalar dy = ny - yr;
+        
+        if (fabs(dx) > 1e-12 || fabs(dy) > 1e-12) {
+          A[0][0] += dx * dx;
+          A[0][1] += dx * dy;
+          A[1][0] += dy * dx;
+          A[1][1] += dy * dy;
           
-          if (dx == 0.0 && dy == 0.0 && n > 0) break;
-          
-          CeedScalar q_neighbor = neighbor_data_R[offset + comp][i];
-          CeedScalar dq = q_neighbor - q_R[comp][i];
-          
-          rhs[0] += dq * dx;
-          rhs[1] += dq * dy;
+          for (CeedInt comp = 0; comp < 3; comp++) {
+            CeedScalar dq = qN[comp] - qR[comp];
+            b[comp][0] += dq * dx;
+            b[comp][1] += dq * dy;
+          }
+          valid_neighbors++;
         }
-        
-        grad_R[comp][0] = lsq_R[0][i] * rhs[0] + lsq_R[1][i] * rhs[1];
-        grad_R[comp][1] = lsq_R[2][i] * rhs[0] + lsq_R[3][i] * rhs[1];
       }
       
-      qR_reconstructed.h  = q_R[0][i] + grad_R[0][0] * dx_edge_R + grad_R[0][1] * dy_edge_R;
-      qR_reconstructed.hu = q_R[1][i] + grad_R[1][0] * dx_edge_R + grad_R[1][1] * dy_edge_R;
-      qR_reconstructed.hv = q_R[2][i] + grad_R[2][0] * dx_edge_R + grad_R[2][1] * dy_edge_R;
-      
-      if (qR_reconstructed.h < 0.0) {
-        qR_reconstructed.h = 0.0;
-        qR_reconstructed.hu = 0.0;
-        qR_reconstructed.hv = 0.0;
+      if (valid_neighbors >= 1) {
+        CeedScalar det = A[0][0] * A[1][1] - A[0][1] * A[1][0];
+        if (fabs(det) > 1e-12) {
+          CeedScalar inv_A[2][2] = {
+            { A[1][1] / det, -A[0][1] / det},
+            {-A[1][0] / det,  A[0][0] / det}
+          };
+          
+          for (CeedInt comp = 0; comp < 3; comp++) {
+            CeedScalar grad_x = inv_A[0][0] * b[comp][0] + inv_A[0][1] * b[comp][1];
+            CeedScalar grad_y = inv_A[1][0] * b[comp][0] + inv_A[1][1] * b[comp][1];
+            
+            CeedScalar dx_edge = edge_mid_x - xr;
+            CeedScalar dy_edge = edge_mid_y - yr;
+            qR_recon[comp] = qR[comp] + grad_x * dx_edge + grad_y * dy_edge;
+          }
+          
+          // Apply MinMod limiting for right cell
+          for (CeedInt comp = 0; comp < 3; comp++) {
+            CeedScalar delta_recon = qR_recon[comp] - qR[comp];
+            CeedScalar limited_delta = delta_recon;
+            
+            for (CeedInt n = 0; n < valid_neighbors; n++) {
+              CeedScalar qN = neighbor_values[12 + 3*n + comp][i];
+              CeedScalar delta_neighbor = qN - qR[comp];
+              
+              if (delta_recon * delta_neighbor <= 0.0) {
+                limited_delta = 0.0;
+                break;
+              } else {
+                if (fabs(delta_neighbor) < fabs(limited_delta)) {
+                  limited_delta = delta_neighbor;
+                }
+              }
+            }
+            qR_recon[comp] = qR[comp] + limited_delta;
+          }
+          
+          if (qR_recon[0] < tiny_h) {
+            qR_recon[0] = tiny_h;
+            qR_recon[1] = 0.0;
+            qR_recon[2] = 0.0;
+          }
+        }
       }
     }
     
     // Compute flux using reconstructed values
-    CeedScalar flux[3], amax;
-    if (qL_reconstructed.h > tiny_h || qR_reconstructed.h > tiny_h) {
-      switch (flux_type) {
-        case RIEMANN_FLUX_ROE:
-          SWERiemannFlux_Roe(gravity, tiny_h, h_anuga, qL_reconstructed, qR_reconstructed, 
-                            sn, cn, flux, &amax);
-          break;
-        // Add other flux types if needed
-      }
+    CeedScalar f[3], amax;
+    if (qL_recon[0] > tiny_h || qR_recon[0] > tiny_h) {
+      SWERiemannFlux_Roe(gravity, tiny_h, h_anuga,
+                        (SWEState){qL_recon[0], qL_recon[1], qL_recon[2]},
+                        (SWEState){qR_recon[0], qR_recon[1], qR_recon[2]},
+                        sn, cn, f, &amax);
       
       for (CeedInt j = 0; j < 3; j++) {
-        cell_L[j][i] = flux[j] * weight_L;
-        cell_R[j][i] = flux[j] * weight_R;
-        accum_flux[j][i] = flux[j];
+        cell_L[j][i] = f[j] * (-edge_length / Al);
+        cell_R[j][i] = f[j] * (edge_length / Ar);
+        flux[j][i] = f[j];
       }
-      courant_num[0][i] = -amax * weight_L * dt;
-      courant_num[1][i] = amax * weight_R * dt;
+      courant[0][i] = -amax * edge_length / Al * dt;
+      courant[1][i] = amax * edge_length / Ar * dt;
     } else {
       // Both cells are dry
       for (CeedInt j = 0; j < 3; j++) {
         cell_L[j][i] = 0.0;
         cell_R[j][i] = 0.0;
-        accum_flux[j][i] = 0.0;
+        flux[j][i] = 0.0;
       }
-      courant_num[0][i] = 0.0;
-      courant_num[1][i] = 0.0;
+      courant[0][i] = 0.0;
+      courant[1][i] = 0.0;
     }
   }
   
   return 0;
 }
 
-// Main Q-function entry point for Roe flux with reconstruction
+// Entry point for Roe flux with full reconstruction
 CEED_QFUNCTION(SWEFluxReconstruction_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[]) {
-  return SWEFluxReconstruction(ctx, Q, in, out, RIEMANN_FLUX_ROE);
+  return SWEFluxReconstructionKernel(ctx, Q, in, out);
 }
-
 // SWE boundary flux operator Q-function (Dirichlet condition)
 CEED_QFUNCTION_HELPER int SWEBoundaryFlux_Dirichlet(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[],
                                                     RiemannFluxType flux_type) {
