@@ -84,6 +84,8 @@ typedef struct {
   RiemannStateData     right_states;     // "right" riemann states on interior edges
   RiemannEdgeData      edges;            // riemann fluxes on interior edges
   OperatorDiagnostics *diagnostics;      // courant number, etc
+  PetscScalar *grad_qL;  // [num_edges][dim][num_comp]
+  PetscScalar *grad_qR;    // courant number, etc
 } InteriorFluxOperator;
 
 static PetscErrorCode ApplyInteriorFlux(void *context, PetscOperatorFields fields, PetscReal dt, Vec u_local, Vec f_global) {
@@ -203,6 +205,275 @@ static PetscErrorCode DestroyInteriorFlux(void *context) {
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscReal MinModLimiter(PetscReal a, PetscReal b) {
+  if (a * b <= 0.0) return 0.0;  // Different signs or zero
+  if (PetscAbs(a) < PetscAbs(b)) return a;
+  else return b;
+}
+
+// Alternative applyinterior function with slope reconstruction
+static PetscErrorCode ApplyInteriorFluxReconstructed(void *context, PetscOperatorFields fields,
+                                                     PetscReal dt, Vec u_local, Vec f_global) {
+  PetscFunctionBegin;
+
+  MPI_Comm comm;
+  PetscCall(PetscObjectGetComm((PetscObject)u_local, &comm));
+
+  InteriorFluxOperator *interior_flux_op = context;
+  RDyMesh              *mesh             = interior_flux_op->mesh;
+  RDyCells             *cells            = &mesh->cells;
+  RDyEdges             *edges            = &mesh->edges;
+
+  const PetscInt num_comp = 3;
+
+  // Get pointers to vector data
+  PetscScalar *u_ptr, *f_ptr;
+  PetscCall(VecGetArray(u_local, &u_ptr));
+  PetscCall(VecGetArray(f_global, &f_ptr));
+
+  PetscInt n_dof;
+  PetscCall(VecGetBlockSize(u_local, &n_dof));
+  PetscCheck(n_dof == 3, comm, PETSC_ERR_USER, "Number of dof in local vector must be 3!");
+
+  RiemannStateData *datal        = &interior_flux_op->left_states;
+  RiemannStateData *datar        = &interior_flux_op->right_states;
+  RiemannEdgeData  *data_edge    = &interior_flux_op->edges;
+  PetscReal        *sn_vec_int   = data_edge->sn;
+  PetscReal        *cn_vec_int   = data_edge->cn;
+  PetscReal        *amax_vec_int = data_edge->amax;
+  PetscReal        *flux_vec_int = data_edge->fluxes;
+
+  RDyPoint *centroids = cells->centroids;
+  PetscInt   num_edges = mesh->num_internal_edges;
+
+  // STEP 2: Reconstruct values at edge locations with slope limiting
+  for (PetscInt e = 0; e < num_edges; ++e) {
+    PetscInt edge_id  = edges->internal_edge_ids[e];
+    PetscInt left_id  = edges->cell_ids[2 * edge_id];
+    PetscInt right_id = edges->cell_ids[2 * edge_id + 1];
+
+    if (left_id < 0 || right_id < 0) continue;
+
+    // Compute midpoint between left and right centroids
+    PetscReal midpoint[2];
+    midpoint[0] = 0.5 * (centroids[left_id].X[0] + centroids[right_id].X[0]);
+    midpoint[1] = 0.5 * (centroids[left_id].X[1] + centroids[right_id].X[1]);
+
+    // Displacement from centroids to midpoint
+    PetscReal dxL[2], dxR[2];
+    dxL[0] = midpoint[0] - centroids[left_id].X[0];
+    dxL[1] = midpoint[1] - centroids[left_id].X[1];
+    dxR[0] = midpoint[0] - centroids[right_id].X[0];
+    dxR[1] = midpoint[1] - centroids[right_id].X[1];
+
+    // Compute geometric weights for gradient calculation
+    PetscReal dx_cell[2];
+    dx_cell[0] = centroids[right_id].X[0] - centroids[left_id].X[0];
+    dx_cell[1] = centroids[right_id].X[1] - centroids[left_id].X[1];
+    PetscReal dist_sq = dx_cell[0]*dx_cell[0] + dx_cell[1]*dx_cell[1];
+    
+    PetscReal grad_weights[2];
+    grad_weights[0] = dx_cell[0] / dist_sq;
+    grad_weights[1] = dx_cell[1] / dist_sq;
+
+    // Collect neighbor information for slope limiting
+    PetscReal neighbor_values[3][4];  // [component][neighbor: left-left, left, right, right-right]
+    PetscInt neighbor_count[2] = {0, 0};  // count of valid neighbors for left and right cells
+    
+    // Find additional neighbors for slope limiting
+    // For left cell, find another neighbor
+    for (PetscInt ee = 0; ee < mesh->num_internal_edges; ++ee) {
+      if (ee == e) continue;
+      PetscInt other_edge_id = edges->internal_edge_ids[ee];
+      PetscInt cell1 = edges->cell_ids[2 * other_edge_id];
+      PetscInt cell2 = edges->cell_ids[2 * other_edge_id + 1];
+      
+      if (cell1 == left_id && cell2 >= 0 && cell2 != right_id) {
+        // Found left neighbor for left cell
+        for (PetscInt c = 0; c < 3; ++c) {
+          neighbor_values[c][0] = u_ptr[n_dof * cell2 + c];  // left-left neighbor
+        }
+        neighbor_count[0] = 1;
+        break;
+      } else if (cell2 == left_id && cell1 >= 0 && cell1 != right_id) {
+        // Found left neighbor for left cell
+        for (PetscInt c = 0; c < 3; ++c) {
+          neighbor_values[c][0] = u_ptr[n_dof * cell1 + c];  // left-left neighbor  
+        }
+        neighbor_count[0] = 1;
+        break;
+      }
+    }
+    
+    // For right cell, find another neighbor  
+    for (PetscInt ee = 0; ee < mesh->num_internal_edges; ++ee) {
+      if (ee == e) continue;
+      PetscInt other_edge_id = edges->internal_edge_ids[ee];
+      PetscInt cell1 = edges->cell_ids[2 * other_edge_id];
+      PetscInt cell2 = edges->cell_ids[2 * other_edge_id + 1];
+      
+      if (cell1 == right_id && cell2 >= 0 && cell2 != left_id) {
+        // Found right neighbor for right cell
+        for (PetscInt c = 0; c < 3; ++c) {
+          neighbor_values[c][3] = u_ptr[n_dof * cell2 + c];  // right-right neighbor
+        }
+        neighbor_count[1] = 1;
+        break;
+      } else if (cell2 == right_id && cell1 >= 0 && cell1 != left_id) {
+        // Found right neighbor for right cell
+        for (PetscInt c = 0; c < 3; ++c) {
+          neighbor_values[c][3] = u_ptr[n_dof * cell1 + c];  // right-right neighbor
+        }
+        neighbor_count[1] = 1;
+        break;
+      }
+    }
+
+    // Reconstruct each component with slope limiting
+    for (PetscInt c = 0; c < num_comp; c++) {
+      // Get cell-centered values for this component
+      PetscScalar qL = u_ptr[n_dof * left_id + c];
+      PetscScalar qR = u_ptr[n_dof * right_id + c];
+
+      // Store current values
+      neighbor_values[c][1] = qL;  // left cell
+      neighbor_values[c][2] = qR;  // right cell
+
+      // Compute unlimited gradient from solution values
+      PetscReal dq = qR - qL;
+      PetscReal grad_unlimited[2];
+      grad_unlimited[0] = dq * grad_weights[0];
+      grad_unlimited[1] = dq * grad_weights[1];
+
+      // Apply slope limiting
+      PetscReal grad_limited[2];
+      
+      if (neighbor_count[0] > 0 && neighbor_count[1] > 0) {
+        // We have enough neighbors for full MUSCL limiting
+        PetscReal dq_left = qL - neighbor_values[c][0];   // qL - qLL  
+        PetscReal dq_right = neighbor_values[c][3] - qR;  // qRR - qR
+        
+        // Apply MinMod limiter in the direction of the edge
+        PetscReal edge_direction[2];
+        PetscReal edge_length = sqrt(dx_cell[0]*dx_cell[0] + dx_cell[1]*dx_cell[1]);
+        edge_direction[0] = dx_cell[0] / edge_length;
+        edge_direction[1] = dx_cell[1] / edge_length;
+        
+        // Project gradients onto edge direction
+        PetscReal grad_edge_unlimited = grad_unlimited[0] * edge_direction[0] + grad_unlimited[1] * edge_direction[1];
+        PetscReal grad_edge_left = dq_left * grad_weights[0] * edge_direction[0] + dq_left * grad_weights[1] * edge_direction[1];
+        PetscReal grad_edge_right = dq_right * grad_weights[0] * edge_direction[0] + dq_right * grad_weights[1] * edge_direction[1];
+        
+        // Apply MinMod limiter
+        PetscReal grad_limited_edge = MinModLimiter(grad_edge_unlimited, 
+                                       MinModLimiter(2.0 * grad_edge_left, 2.0 * grad_edge_right));
+        
+        // Convert back to x,y components
+        PetscReal limiter_factor = (PetscAbs(grad_edge_unlimited) > 1e-12) ? 
+                                   grad_limited_edge / grad_edge_unlimited : 1.0;
+        
+        grad_limited[0] = limiter_factor * grad_unlimited[0];
+        grad_limited[1] = limiter_factor * grad_unlimited[1];
+      } else {
+        // Fall back to simpler limiting - just reduce gradient magnitude
+        PetscReal max_variation = PetscMax(PetscAbs(dq), 1e-12);
+        PetscReal grad_magnitude = sqrt(grad_unlimited[0]*grad_unlimited[0] + grad_unlimited[1]*grad_unlimited[1]);
+        
+        if (grad_magnitude > 2.0 * max_variation / (0.5 * sqrt(dist_sq))) {
+          PetscReal reduction_factor = 2.0 * max_variation / (grad_magnitude * 0.5 * sqrt(dist_sq));
+          grad_limited[0] = reduction_factor * grad_unlimited[0];
+          grad_limited[1] = reduction_factor * grad_unlimited[1];
+        } else {
+          grad_limited[0] = grad_unlimited[0];
+          grad_limited[1] = grad_unlimited[1];
+        }
+      }
+
+      // Reconstruct values at midpoint using limited gradients
+      PetscScalar qL_rec = qL + grad_limited[0] * dxL[0] + grad_limited[1] * dxL[1];
+      PetscScalar qR_rec = qR + grad_limited[0] * dxR[0] + grad_limited[1] * dxR[1];
+
+      // Store reconstructed values in Riemann data structures
+      if (c == 0) {        // h (water height)
+        datal->h[e]  = PetscMax(qL_rec, 0.0);  // ensure non-negative height
+        datar->h[e]  = PetscMax(qR_rec, 0.0);
+      } else if (c == 1) { // hu (x-momentum)
+        datal->hu[e] = qL_rec;
+        datar->hu[e] = qR_rec;
+      } else if (c == 2) { // hv (y-momentum)
+        datal->hv[e] = qL_rec;
+        datar->hv[e] = qR_rec;
+      }
+    }
+  }
+
+  // STEPS 3-4: Same as original - compute velocities, Riemann solver, flux accumulation
+  const PetscReal tiny_h  = interior_flux_op->tiny_h;
+  const PetscReal h_anuga = interior_flux_op->h_anuga_regular;
+  PetscCall(ComputeRiemannVelocities(tiny_h, h_anuga, datal));
+  PetscCall(ComputeRiemannVelocities(tiny_h, h_anuga, datar));
+
+  // Riemann solver
+  switch (interior_flux_op->riemann) {
+    case RIEMANN_ROE:
+      PetscCall(ComputeSWERoeFlux(datal, datar, sn_vec_int, cn_vec_int, flux_vec_int, amax_vec_int));
+      break;
+    default:
+      SETERRQ(comm, PETSC_ERR_USER, "Unsupported Riemann solver");
+  }
+
+  // Flux accumulation (same as your original)
+  for (PetscInt e = 0; e < num_edges; ++e) {
+    PetscInt edge_id       = edges->internal_edge_ids[e];
+    PetscInt left_id       = edges->cell_ids[2 * edge_id];
+    PetscInt right_id      = edges->cell_ids[2 * edge_id + 1];
+
+    if (left_id < 0 || right_id < 0) continue;
+
+    PetscReal hl = datal->h[e];
+    PetscReal hr = datar->h[e];
+
+    if (!(hl < tiny_h && hr < tiny_h)) {
+      PetscReal edge_len = edges->lengths[edge_id];
+      PetscReal areal    = cells->areas[left_id];
+      PetscReal arear    = cells->areas[right_id];
+
+      PetscReal cnum = amax_vec_int[e] * edge_len / PetscMin(areal, arear) * dt;
+      CourantNumberDiagnostics *courant_num_diags = &interior_flux_op->diagnostics->courant_number;
+      if (cnum > courant_num_diags->max_courant_num) {
+        courant_num_diags->max_courant_num = cnum;
+        courant_num_diags->global_edge_id  = edges->global_ids[e];
+        courant_num_diags->global_cell_id  = (areal < arear) ? cells->global_ids[left_id] : cells->global_ids[right_id];
+      }
+
+      for (PetscInt i = 0; i < num_comp; ++i) {
+        if (cells->is_owned[left_id]) {
+          PetscInt owned_id = cells->local_to_owned[left_id];
+          f_ptr[num_comp * owned_id + i] += flux_vec_int[num_comp * e + i] * (-edge_len / areal);
+        }
+        if (cells->is_owned[right_id]) {
+          PetscInt owned_id = cells->local_to_owned[right_id];
+          f_ptr[num_comp * owned_id + i] += flux_vec_int[num_comp * e + i] * (+edge_len / arear);
+        }
+      }
+    }
+  }
+
+  PetscCall(VecRestoreArray(u_local, &u_ptr));
+  PetscCall(VecRestoreArray(f_global, &f_ptr));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode DestroyInteriorFluxReconstructed(void *context) {
+  PetscFunctionBegin;
+  InteriorFluxOperator *interior_flux_op = context;
+  DestroyRiemannStateData(interior_flux_op->left_states);
+  DestroyRiemannStateData(interior_flux_op->right_states);
+  DestroyRiemannEdgeData(interior_flux_op->edges);
+  PetscCall(PetscFree(interior_flux_op));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 /// Creates a PetscOperator that computes fluxes between pairs of cells on the
 /// domain's interior, suitable for the shallow water equations.
 /// @param [in]    mesh        mesh defining the computational domain of the operator
@@ -245,6 +516,54 @@ PetscErrorCode CreateSWEPetscInteriorFluxOperator(RDyMesh *mesh, const RDyConfig
 
   PetscFunctionReturn(PETSC_SUCCESS);
 }
+
+PetscErrorCode CreateSWEPetscInteriorFluxOperatorReconstructed(RDyMesh *mesh, const RDyConfig config, 
+                                                               OperatorDiagnostics *diagnostics, 
+                                                               PetscOperator *petsc_op) {
+  PetscFunctionBegin;
+
+  const PetscInt num_comp = 3;  // h, hu, hv
+
+  InteriorFluxOperator *interior_flux_op;
+  PetscCall(PetscCalloc1(1, &interior_flux_op));
+  *interior_flux_op = (InteriorFluxOperator){
+      .riemann         = config.numerics.riemann,
+      .mesh            = mesh,
+      .diagnostics     = diagnostics,
+      .tiny_h          = config.physics.flow.tiny_h,
+      .h_anuga_regular = config.physics.flow.h_anuga_regular,
+  };
+
+  // Allocate Riemann data structures (same as original)
+  PetscCall(CreateRiemannStateData(mesh->num_internal_edges, &interior_flux_op->left_states));
+  PetscCall(CreateRiemannStateData(mesh->num_internal_edges, &interior_flux_op->right_states));
+  PetscCall(CreateRiemannEdgeData(mesh->num_internal_edges, num_comp, &interior_flux_op->edges));
+
+  // Copy mesh geometry data into place (same as original)
+  RDyEdges *edges = &mesh->edges;
+  for (PetscInt e = 0; e < mesh->num_internal_edges; e++) {
+    PetscInt edge_id       = edges->internal_edge_ids[e];
+    PetscInt right_cell_id = edges->cell_ids[2 * edge_id + 1];
+
+    if (right_cell_id != -1) {
+      interior_flux_op->edges.cn[e] = edges->cn[edge_id];
+      interior_flux_op->edges.sn[e] = edges->sn[edge_id];
+    }
+  }
+
+  // No gradient allocation needed - we compute on-the-fly!
+
+  PetscCall(PetscOperatorCreate(interior_flux_op, ApplyInteriorFluxReconstructed, 
+                                DestroyInteriorFluxReconstructed, petsc_op));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+/// Creates a PetscOperator that computes fluxes between pairs of cells on the
+/// domain's interior, suitable for the shallow water equations.
+/// @param [in]    mesh        mesh defining the computational domain of the operator
+/// @param [in]    config      RDycore's configuration
+/// @param [inout] diagnostics a set of diagnostics that can be updated by the PetscOperator
+/// @param [out]   petsc_op    the newly created PetscOperator
 
 //------------------------
 // Boundary Flux Operator
