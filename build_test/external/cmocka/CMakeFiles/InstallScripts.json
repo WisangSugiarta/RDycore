@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/external/cmocka/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/external/cmocka/include/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/external/cmocka/src/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/external/cmocka/doc/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

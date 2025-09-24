@@ -422,6 +422,17 @@ static PetscErrorCode CreateCeedInteriorFluxOperatorReconstruction(const RDyConf
     PetscCallCEED(CeedVectorRestoreArray(neighbor_coords, (CeedScalar **)&nc));
   }
 
+  // ADD DEBUG CODE HERE:
+  printf("DEBUG: Checking mesh neighbor connectivity...\n");
+  for (CeedInt c = 0; c < 10; c++) {  // Check first 10 cells
+    printf("Cell %d has %d neighbors: ", c, cells->num_neighbors[c]);
+    for (CeedInt n = 0; n < cells->num_neighbors[c]; n++) {
+      CeedInt neighbor = cells->neighbor_ids[cells->neighbor_offsets[c] + n];
+      printf("%d ", neighbor);
+    }
+    printf("\n");
+  }
+
   // 4. Create neighbor values restriction (active)
   {
     CeedInt *neighbor_offsets;

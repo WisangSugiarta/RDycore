@@ -1,0 +1,6 @@
+/Users/wsugiarta/Documents/github/RDycore/build_test/include/yaml.h
+/Users/wsugiarta/Documents/github/RDycore/build_test/lib/libyaml.a
+/Users/wsugiarta/Documents/github/RDycore/build_test/cmake/yamlConfig.cmake
+/Users/wsugiarta/Documents/github/RDycore/build_test/cmake/yamlTargets.cmake
+/Users/wsugiarta/Documents/github/RDycore/build_test/cmake/yamlTargets-debug.cmake
+/Users/wsugiarta/Documents/github/RDycore/build_test/cmake/yamlConfigVersion.cmake

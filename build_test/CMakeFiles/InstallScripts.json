@@ -1,0 +1,19 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/external/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/share/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/src/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/src/tests/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/src/f90-mod/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/src/f90-mod/tests/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/driver/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/driver/tests/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/driver/tests/amr/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/driver/tests/swe_roe/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/driver/tests/sediment/cmake_install.cmake",
+		"/Users/wsugiarta/Documents/github/RDycore/build_test/driver/tests/bad_input/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
