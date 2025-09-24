@@ -422,9 +422,52 @@ static PetscErrorCode CreateCeedInteriorFluxOperatorReconstruction(const RDyConf
     PetscCallCEED(CeedVectorRestoreArray(neighbor_coords, (CeedScalar **)&nc));
   }
 
-  // ADD DEBUG CODE HERE:
-  printf("DEBUG: Checking mesh neighbor connectivity...\n");
-  for (CeedInt c = 0; c < 10; c++) {  // Check first 10 cells
+  // BUILD NEIGHBOR CONNECTIVITY FOR RECONSTRUCTION
+  printf("DEBUG: Building neighbor connectivity from edges...\n");
+  
+  // First, reset neighbor counts to 0 (they're initialized to max)
+  for (CeedInt c = 0; c < mesh->num_cells; c++) {
+    cells->num_neighbors[c] = 0;
+  }
+  
+  // Count actual neighbors by examining edges
+  for (CeedInt e = 0; e < mesh->num_edges; e++) {
+    CeedInt left = edges->cell_ids[2 * e];
+    CeedInt right = edges->cell_ids[2 * e + 1];
+    
+    // Valid cell-to-cell edge (not boundary)
+    if (left >= 0 && left < mesh->num_cells && right >= 0 && right < mesh->num_cells) {
+      cells->num_neighbors[left]++;
+      cells->num_neighbors[right]++;
+    }
+  }
+  
+  // Now populate the actual neighbor IDs
+  CeedInt *neighbor_counters;
+  PetscCall(PetscCalloc1(mesh->num_cells, &neighbor_counters));
+  
+  for (CeedInt e = 0; e < mesh->num_edges; e++) {
+    CeedInt left = edges->cell_ids[2 * e];
+    CeedInt right = edges->cell_ids[2 * e + 1];
+    
+    if (left >= 0 && left < mesh->num_cells && right >= 0 && right < mesh->num_cells) {
+      // Add right as neighbor of left
+      CeedInt left_idx = cells->neighbor_offsets[left] + neighbor_counters[left];
+      cells->neighbor_ids[left_idx] = right;
+      neighbor_counters[left]++;
+      
+      // Add left as neighbor of right
+      CeedInt right_idx = cells->neighbor_offsets[right] + neighbor_counters[right];
+      cells->neighbor_ids[right_idx] = left;
+      neighbor_counters[right]++;
+    }
+  }
+  
+  PetscCall(PetscFree(neighbor_counters));
+  
+  // Debug: verify connectivity was built correctly
+  printf("DEBUG: Built neighbor connectivity - first 10 cells:\n");
+  for (CeedInt c = 0; c < 10 && c < mesh->num_cells; c++) {
     printf("Cell %d has %d neighbors: ", c, cells->num_neighbors[c]);
     for (CeedInt n = 0; n < cells->num_neighbors[c]; n++) {
       CeedInt neighbor = cells->neighbor_ids[cells->neighbor_offsets[c] + n];

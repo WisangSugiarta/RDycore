@@ -97,6 +97,7 @@ CEED_QFUNCTION(SWEFlux_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], 
   return SWEFlux(ctx, Q, in, out, RIEMANN_FLUX_ROE);
 }
 
+// SWE interior flux operator Q-function with slope reconstruction
 CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q, 
                                                      const CeedScalar *const in[], 
                                                      CeedScalar *const out[]) {
@@ -140,7 +141,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
     CeedScalar qL_recon[3] = {qL[0], qL[1], qL[2]};
     CeedScalar qR_recon[3] = {qR[0], qR[1], qR[2]};
     
-    // **LEFT CELL RECONSTRUCTION**
+    // Left cell reconstruction
     if (qL[0] > tiny_h) {
       CeedScalar A[2][2] = {{0}}, b[3][2] = {{0}};
       CeedInt valid_neighbors = 0;
@@ -150,10 +151,10 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
         CeedScalar nx = neighbor_coords[2*n][i];     // x coordinate of neighbor n
         CeedScalar ny = neighbor_coords[2*n+1][i];   // y coordinate of neighbor n
         
-        // Check if this is a valid neighbor (zeros indicate no neighbor)
+        // Check if this is a valid neighbor (zeros indicate no neighbor, -1 is a boundary I think)
         if (nx == 0.0 && ny == 0.0 && n > 0) break;  // First neighbor might be at origin
         
-        // Get neighbor solution values
+        // neighbor solution values
         CeedScalar qN[3] = {
           neighbor_values[3*n][i],     // h of neighbor n
           neighbor_values[3*n+1][i],   // hu of neighbor n
@@ -164,7 +165,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
         CeedScalar dx = nx - xl;
         CeedScalar dy = ny - yl;
         
-        // Only use if neighbor is actually different from center
+        // use neighbor if it is different from center
         if (fabs(dx) > 1e-12 || fabs(dy) > 1e-12) {
           // Add to least squares system
           A[0][0] += dx * dx;
@@ -181,7 +182,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
         }
       }
       
-      // Solve least squares system and reconstruct (reduced requirement to 1 neighbor for now)
+      // Solve LS and reconstruct
       if (valid_neighbors >= 1) {
         CeedScalar det = A[0][0] * A[1][1] - A[0][1] * A[1][0];
         if (fabs(det) > 1e-12) {
@@ -217,12 +218,14 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
                 limited_delta = 0.0;
                 break;
               } else {
+
                 // Same signs - take minimum magnitude
                 if (fabs(delta_neighbor) < fabs(limited_delta)) {
                   limited_delta = delta_neighbor;
                 }
               }
             }
+            
             qL_recon[comp] = qL[comp] + limited_delta;
           }
           
@@ -236,7 +239,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
       }
     }
     
-    // **RIGHT CELL RECONSTRUCTION**
+    // Right cell reconstruction
     if (qR[0] > tiny_h) {
       CeedScalar A[2][2] = {{0}}, b[3][2] = {{0}};
       CeedInt valid_neighbors = 0;
@@ -307,6 +310,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
                 }
               }
             }
+            
             qR_recon[comp] = qR[comp] + limited_delta;
           }
           
