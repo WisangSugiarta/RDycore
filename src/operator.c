@@ -138,6 +138,8 @@ static PetscErrorCode AddOperatorFluxDivergence(Operator *op) {
   PetscCall(DMCreateGlobalVector(op->dm, &op->flux_divergence));
   PetscCall(VecZeroEntries(op->flux_divergence));
 
+
+
   if (CeedEnabled()) {
     Ceed    ceed               = CeedContext();
     CeedInt num_comp           = op->num_components;
@@ -180,12 +182,20 @@ static PetscErrorCode AddOperatorFluxDivergence(Operator *op) {
 /// @param [in]  boundary_conditions an array of boundary conditions corresponding to the domain boundaries
 /// @param [out] op                  the newly created operator
 /// @return 0 on success, or a non-zero error code on failure
+
 PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_mesh, PetscInt num_comp, PetscInt num_regions, RDyRegion *regions,
                               PetscInt num_boundaries, RDyBoundary *boundaries, RDyCondition *boundary_conditions, Operator **operator) {
   PetscFunctionBegin;
 
   MPI_Comm comm;
   PetscCall(PetscObjectGetComm((PetscObject)domain_dm, &comm));
+
+  // Parse slope reconstruction option
+  PetscBool use_slope_reconstruction = PETSC_FALSE;
+  PetscCall(PetscOptionsGetBool(NULL, NULL, "-use_slope_reconstruction", &use_slope_reconstruction, NULL));
+  
+  // Store in config for consistency
+  config->numerics.use_slope_reconstruction = use_slope_reconstruction;
 
   // check our arguments
   PetscCheck(domain_mesh, comm, PETSC_ERR_USER, "Cannot create an operator with no mesh");
@@ -216,14 +226,23 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
       PetscCall(PetscLogEventRegister("CeedOperatorApp", RDY_CLASSID, &RDY_CeedOperatorApply_));
       first_time = PETSC_FALSE;
     }
-
-    PetscCall(CreateCeedFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
+    
+    // CEED path with slope reconstruction support
+    if (use_slope_reconstruction) {
+      PetscCall(CreateCeedFluxOperatorReconstructed((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                      (*operator)->boundary_conditions, &(*operator)->ceed.flux));
+    } else {
+      PetscCall(CreateCeedFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
+                                     (*operator)->boundary_conditions, &(*operator)->ceed.flux));
+    }
+
     PetscCall(CreateCeedSourceOperator((*operator)->config, (*operator)->mesh, &(*operator)->ceed.source));
   } else {
-    PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
-                                      (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
-                                      &(*operator)->diagnostics, &(*operator)->petsc.flux));
+    // PETSc path with slope reconstruction support
+   PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
+                                        (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
+                                        &(*operator)->diagnostics, &(*operator)->petsc.flux));
+    
     PetscCall(CreatePetscSourceOperator((*operator)->config, (*operator)->mesh, (*operator)->petsc.external_sources,
                                         (*operator)->petsc.material_properties, &(*operator)->petsc.source));
   }
@@ -236,6 +255,7 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
 
   PetscFunctionReturn(PETSC_SUCCESS);
 }
+
 
 /// Frees all resources devoted to the operator.
 /// @param [out] op the operator to be freed

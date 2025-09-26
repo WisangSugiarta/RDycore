@@ -1,0 +1,106 @@
+# 2D SWE radial dam break in RDycore
+# Domain: [-2.5, 2.5] x [-2.5, 2.5]
+# IC: circular patch h = 2.0 inside radius R = 0.5 around (0,0), h = 1.0 elsewhere
+# BCs: right/top reflecting, left/bottom outflow (to match the Clawpack example)
+
+physics:
+  flow:
+    mode: swe
+    source:
+      method: implicit_xq2018
+
+numerics:
+  spatial: fv
+  temporal: euler
+  riemann: roe
+
+logging:
+  level: detail
+
+time:
+  final_time: 2.5
+  unit: seconds
+  max_step: 10000
+
+checkpoint:
+  format: binary
+  interval: 500
+
+output:
+  format: xdmf
+  output_interval: 50
+  batch_size: 20
+  time_series:
+    boundary_fluxes: 20
+    observations:
+      interval: 25
+      sites:
+        cells: [0, 10, 500, 1000]
+
+grid:
+  file: radial_dam_5x5_circle.msh
+
+# Two surface regions in the mesh:
+#   - region 1: interior disk (r <= 0.5)
+#   - region 2: exterior (r > 0.5)
+regions:
+  - name: inner_disk
+    grid_region_id: 1
+  - name: outer_field
+    grid_region_id: 2
+
+surface_composition:
+  - region: inner_disk
+    material: smooth
+  - region: outer_field
+    material: smooth
+
+materials:
+  - name: smooth
+    properties:
+      manning:
+        value: 0.0  
+
+# Initial conditions: piecewise-constant dept
+initial_conditions:
+  - region: inner_disk
+    flow: high_pool
+  - region: outer_field
+    flow: low_pool
+
+# Boundary tags assumed:
+#   1: left, 2: right, 3: bottom, 4: top
+boundaries:
+  - name: left
+    grid_boundary_id: 1
+  - name: right
+    grid_boundary_id: 2
+  - name: bottom
+    grid_boundary_id: 3
+  - name: top
+    grid_boundary_id: 4
+
+# BC policy to match your Clawpack setup:
+#   left & bottom: outflow (critical)
+#   right & top: reflecting wall
+boundary_conditions:
+  - boundaries: [left, bottom]
+    flow: outflow_bc
+  - boundaries: [right, top]
+    flow: reflecting_bc
+
+flow_conditions:
+  - name: high_pool
+    type: dirichlet
+    height: 2.0
+    x_momentum: 0.0
+    y_momentum: 0.0
+  - name: low_pool
+    type: dirichlet
+    height: 1.0
+    x_momentum: 0.0
+    y_momentum: 0.0
+  - name: reflecting_bc
+    type: reflecting
+  - name: outflow_bc
+    type: critical-outflow

@@ -97,6 +97,164 @@ CEED_QFUNCTION(SWEFlux_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], 
   return SWEFlux(ctx, Q, in, out, RIEMANN_FLUX_ROE);
 }
 
+// MinMod limiter helper function for CEED
+CEED_QFUNCTION_HELPER CeedScalar MinModLimiter_CEED(CeedScalar a, CeedScalar b) {
+  if (a * b <= 0.0) return 0.0;  // Different signs or zero
+  return (fabs(a) < fabs(b)) ? a : b;
+}
+
+CEED_QFUNCTION_HELPER int SWEFluxReconstructed(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[], RiemannFluxType flux_type) {
+  // Inputs (must match the QFunction field order exactly)
+  const CeedScalar(*geom)[CEED_Q_VLA]           = (const CeedScalar(*)[CEED_Q_VLA])in[0];  // geom
+  const CeedScalar(*grad_geom)[CEED_Q_VLA]      = (const CeedScalar(*)[CEED_Q_VLA])in[1];  // grad_geom
+  const CeedScalar(*q_L)[CEED_Q_VLA]            = (const CeedScalar(*)[CEED_Q_VLA])in[2];  // q_left
+  const CeedScalar(*q_R)[CEED_Q_VLA]            = (const CeedScalar(*)[CEED_Q_VLA])in[3];  // q_right
+  const CeedScalar(*q_L_neighbors)[CEED_Q_VLA]  = (const CeedScalar(*)[CEED_Q_VLA])in[4];  // q_left_neighbors
+  const CeedScalar(*q_R_neighbors)[CEED_Q_VLA]  = (const CeedScalar(*)[CEED_Q_VLA])in[5];  // q_right_neighbors
+
+  // Outputs
+  CeedScalar(*cell_L)[CEED_Q_VLA]      = (CeedScalar(*)[CEED_Q_VLA])out[0];
+  CeedScalar(*cell_R)[CEED_Q_VLA]      = (CeedScalar(*)[CEED_Q_VLA])out[1];
+  CeedScalar(*accum_flux)[CEED_Q_VLA]  = (CeedScalar(*)[CEED_Q_VLA])out[2];
+  CeedScalar(*courant_num)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[3];
+  
+  const SWEContext context = (SWEContext)ctx;
+
+  const CeedScalar dt      = context->dtime;
+  const CeedScalar tiny_h  = context->tiny_h;
+  const CeedScalar h_anuga = context->h_anuga_regular;
+  const CeedScalar gravity = context->gravity;
+
+  for (CeedInt i = 0; i < Q; i++) {
+    // Extract geometric factors for gradient computation
+    const CeedScalar dxL[2]  = {grad_geom[0][i], grad_geom[1][i]};  // displacement from left centroid to midpoint
+    const CeedScalar dxR[2]  = {grad_geom[2][i], grad_geom[3][i]};  // displacement from right centroid to midpoint
+    const CeedScalar dist_sq = grad_geom[4][i];                     // distance squared between cell centers
+
+    // Get current cell values
+    SWEState qL_center = {q_L[0][i], q_L[1][i], q_L[2][i]};
+    SWEState qR_center = {q_R[0][i], q_R[1][i], q_R[2][i]};
+
+    // Get neighbor values for slope limiting
+    // Based on your restriction setup: q_offset_l_neighbors[2 * owned_edge] and q_offset_l_neighbors[2 * owned_edge + 1]
+    // Data layout per edge: [left_neighbor_h, left_neighbor_hu, left_neighbor_hv, placeholder_h, placeholder_hu, placeholder_hv]
+    SWEState qL_neighbor = {q_L_neighbors[0][i], q_L_neighbors[1][i], q_L_neighbors[2][i]};  // left cell's neighbor
+    SWEState qR_neighbor = {q_R_neighbors[0][i], q_R_neighbors[1][i], q_R_neighbors[2][i]};  // right cell's neighbor
+
+    // Compute geometric weights for gradients (2-point stencil)
+    const CeedScalar dx_cell_x = (dxR[0] - dxL[0]);  // x-direction between cell centers
+    const CeedScalar dx_cell_y = (dxR[1] - dxL[1]);  // y-direction between cell centers
+    const CeedScalar grad_weight_x = dx_cell_x / dist_sq;
+    const CeedScalar grad_weight_y = dx_cell_y / dist_sq;
+
+    // Reconstruct each component with slope limiting
+    SWEState qL_reconstructed, qR_reconstructed;
+    
+    // Component 0: h (water height)
+    {
+      const CeedScalar dq = qR_center.h - qL_center.h;
+      
+      // Unlimited gradient
+      const CeedScalar grad_unlimited[2] = {dq * grad_weight_x, dq * grad_weight_y};
+      
+      // Compute neighbor gradients for slope limiting
+      const CeedScalar dq_L_neighbor = qL_center.h - qL_neighbor.h;
+      const CeedScalar dq_R_neighbor = qR_neighbor.h - qR_center.h;
+      
+      // Apply MinMod limiter
+      const CeedScalar grad_L_x = dq_L_neighbor * grad_weight_x;
+      const CeedScalar grad_R_x = dq_R_neighbor * grad_weight_x;
+      const CeedScalar grad_limited_x = MinModLimiter_CEED(grad_unlimited[0], 
+                                                          MinModLimiter_CEED(2.0 * grad_L_x, 2.0 * grad_R_x));
+      
+      const CeedScalar grad_L_y = dq_L_neighbor * grad_weight_y;
+      const CeedScalar grad_R_y = dq_R_neighbor * grad_weight_y;
+      const CeedScalar grad_limited_y = MinModLimiter_CEED(grad_unlimited[1], 
+                                                          MinModLimiter_CEED(2.0 * grad_L_y, 2.0 * grad_R_y));
+      
+      // Reconstruct values at edge midpoint (ensure non-negative height)
+      qL_reconstructed.h = fmax(0.0, qL_center.h + grad_limited_x * dxL[0] + grad_limited_y * dxL[1]);
+      qR_reconstructed.h = fmax(0.0, qR_center.h + grad_limited_x * dxR[0] + grad_limited_y * dxR[1]);
+    }
+    
+    // Component 1: hu (x-momentum)  
+    {
+      const CeedScalar dq = qR_center.hu - qL_center.hu;
+      const CeedScalar grad_unlimited[2] = {dq * grad_weight_x, dq * grad_weight_y};
+      
+      const CeedScalar dq_L_neighbor = qL_center.hu - qL_neighbor.hu;
+      const CeedScalar dq_R_neighbor = qR_neighbor.hu - qR_center.hu;
+      
+      const CeedScalar grad_L_x = dq_L_neighbor * grad_weight_x;
+      const CeedScalar grad_R_x = dq_R_neighbor * grad_weight_x;
+      const CeedScalar grad_limited_x = MinModLimiter_CEED(grad_unlimited[0], 
+                                                          MinModLimiter_CEED(2.0 * grad_L_x, 2.0 * grad_R_x));
+      
+      const CeedScalar grad_L_y = dq_L_neighbor * grad_weight_y;
+      const CeedScalar grad_R_y = dq_R_neighbor * grad_weight_y;
+      const CeedScalar grad_limited_y = MinModLimiter_CEED(grad_unlimited[1], 
+                                                          MinModLimiter_CEED(2.0 * grad_L_y, 2.0 * grad_R_y));
+      
+      qL_reconstructed.hu = qL_center.hu + grad_limited_x * dxL[0] + grad_limited_y * dxL[1];
+      qR_reconstructed.hu = qR_center.hu + grad_limited_x * dxR[0] + grad_limited_y * dxR[1];
+    }
+    
+    // Component 2: hv (y-momentum)
+    {
+      const CeedScalar dq = qR_center.hv - qL_center.hv;
+      const CeedScalar grad_unlimited[2] = {dq * grad_weight_x, dq * grad_weight_y};
+      
+      const CeedScalar dq_L_neighbor = qL_center.hv - qL_neighbor.hv;
+      const CeedScalar dq_R_neighbor = qR_neighbor.hv - qR_center.hv;
+      
+      const CeedScalar grad_L_x = dq_L_neighbor * grad_weight_x;
+      const CeedScalar grad_R_x = dq_R_neighbor * grad_weight_x;
+      const CeedScalar grad_limited_x = MinModLimiter_CEED(grad_unlimited[0], 
+                                                          MinModLimiter_CEED(2.0 * grad_L_x, 2.0 * grad_R_x));
+      
+      const CeedScalar grad_L_y = dq_L_neighbor * grad_weight_y;
+      const CeedScalar grad_R_y = dq_R_neighbor * grad_weight_y;
+      const CeedScalar grad_limited_y = MinModLimiter_CEED(grad_unlimited[1], 
+                                                          MinModLimiter_CEED(2.0 * grad_L_y, 2.0 * grad_R_y));
+      
+      qL_reconstructed.hv = qL_center.hv + grad_limited_x * dxL[0] + grad_limited_y * dxL[1];
+      qR_reconstructed.hv = qR_center.hv + grad_limited_x * dxR[0] + grad_limited_y * dxR[1];
+    }
+
+    // Compute Riemann flux using reconstructed states
+    if (qL_reconstructed.h > tiny_h || qR_reconstructed.h > tiny_h) {
+      CeedScalar flux[3], amax;
+      switch (flux_type) {
+        case RIEMANN_FLUX_ROE:
+          SWERiemannFlux_Roe(gravity, tiny_h, h_anuga, qL_reconstructed, qR_reconstructed, geom[0][i], geom[1][i], flux, &amax);
+          break;
+      }
+      
+      for (CeedInt j = 0; j < 3; j++) {
+        cell_L[j][i]     = flux[j] * geom[2][i];
+        cell_R[j][i]     = flux[j] * geom[3][i];
+        accum_flux[j][i] = flux[j];
+      }
+      courant_num[0][i] = -amax * geom[2][i] * dt;
+      courant_num[1][i] = amax * geom[3][i] * dt;
+    } else {
+      for (CeedInt j = 0; j < 3; j++) {
+        cell_L[j][i]     = 0.0;
+        cell_R[j][i]     = 0.0;
+        accum_flux[j][i] = 0.0;
+      }
+      courant_num[0][i] = 0.0;
+      courant_num[1][i] = 0.0;
+    }
+  }
+  return 0;
+}
+
+CEED_QFUNCTION(SWEFluxReconstructed_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[]) {
+  return SWEFluxReconstructed(ctx, Q, in, out, RIEMANN_FLUX_ROE);
+}
+
+
 // SWE boundary flux operator Q-function (Dirichlet condition)
 CEED_QFUNCTION_HELPER int SWEBoundaryFlux_Dirichlet(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[],
                                                     RiemannFluxType flux_type) {
