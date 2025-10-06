@@ -626,7 +626,11 @@ PetscErrorCode RDyReadOneDOFLocalVecFromBinaryFile(RDy rdy, const char filename[
 }
 
 // reads data for a single DOF from a binary file into a global Vec
+<<<<<<< HEAD
 PetscErrorCode RDyReadAMRScalarGlobalVecLevel0FromBinary(RDy rdy, const char filename[], Vec *global) {
+=======
+PetscErrorCode RDyReadOneDOFBaseGlobalVecFromBinaryFile(RDy rdy, const char filename[], Vec *global) {
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
   PetscFunctionBegin;
 
   PetscViewer viewer;
@@ -635,22 +639,33 @@ PetscErrorCode RDyReadAMRScalarGlobalVecLevel0FromBinary(RDy rdy, const char fil
   // create a naturally-ordered vector with a stride equal to the number of
   Vec natural;
 
+<<<<<<< HEAD
   PetscCall(DMPlexCreateNaturalVector(rdy->amr.dm_1dof_base, &natural));
   PetscCall(DMCreateGlobalVector(rdy->amr.dm_1dof_base, global));
+=======
+  PetscCall(DMPlexCreateNaturalVector(rdy->dm_1dof_amr_base, &natural));
+  PetscCall(DMCreateGlobalVector(rdy->dm_1dof_amr_base, global));
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
 
   // load the properties into the vector and copy them into place
   PetscCall(VecLoad(natural, viewer));
   PetscCall(PetscViewerDestroy(&viewer));
 
   // scatter natural-to-global
+<<<<<<< HEAD
   PetscCall(DMPlexNaturalToGlobalBegin(rdy->amr.dm_1dof_base, natural, *global));
   PetscCall(DMPlexNaturalToGlobalEnd(rdy->amr.dm_1dof_base, natural, *global));
+=======
+  PetscCall(DMPlexNaturalToGlobalBegin(rdy->dm_1dof_amr_base, natural, *global));
+  PetscCall(DMPlexNaturalToGlobalEnd(rdy->dm_1dof_amr_base, natural, *global));
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
 
   PetscCall(VecDestroy(&natural));
 
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+<<<<<<< HEAD
 // maps a single-DOF global vector defined on the level-0 mesh to a single-DOF
 // global vector defined on the current mesh
 PetscErrorCode RDyMapAMRScalarGlobalVecLevel0ToCurrentLevel(RDy rdy, Vec global_base, Vec *global_current) {
@@ -665,6 +680,20 @@ PetscErrorCode RDyMapAMRScalarGlobalVecLevel0ToCurrentLevel(RDy rdy, Vec global_
   Vec local_current;
   PetscCall(DMCreateLocalVector(rdy->dm_1dof, &local_current));
   PetscCall(MatMult(rdy->amr.BaseToCurrentMat1Dof, local_base, local_current));
+=======
+PetscErrorCode RDyMapOneDOFGlobalBaseVecToCurrentGlobalVec(RDy rdy, Vec global_base, Vec *global_current) {
+  PetscFunctionBegin;
+
+  Vec local_base;
+  PetscCall(DMCreateLocalVector(rdy->dm_1dof_amr_base, &local_base));
+
+  PetscCall(DMGlobalToLocalBegin(rdy->dm_1dof_amr_base, global_base, INSERT_VALUES, local_base));
+  PetscCall(DMGlobalToLocalEnd(rdy->dm_1dof_amr_base, global_base, INSERT_VALUES, local_base));
+
+  Vec local_current;
+  PetscCall(DMCreateLocalVector(rdy->dm_1dof, &local_current));
+  PetscCall(MatMult(rdy->BaseToCurrentMat1Dof, local_base, local_current));
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
 
   PetscCall(DMCreateGlobalVector(rdy->dm_1dof, global_current));
   PetscCall(DMLocalToGlobalBegin(rdy->dm_1dof, local_current, INSERT_VALUES, *global_current));

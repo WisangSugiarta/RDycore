@@ -102,7 +102,11 @@ static PetscErrorCode MarkLocalCellsForRefinementBasedOnDataset(RDy rdy, Vec glo
   }
   PetscCall(VecRestoreArray(global, &global_ptr));
 
+<<<<<<< HEAD
   PetscCall(RDyMarkLocalCellsForAMR(rdy, ncells_local, refine_cell));
+=======
+  PetscCall(RDyMarkLocalCellsForRefinement(rdy, ncells_local, refine_cell));
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
 
   // free up memory
   PetscFree(refine_cell);
@@ -141,7 +145,11 @@ PetscErrorCode MarkLocalCellsForRefinement(RDy rdy) {
     }
   }
 
+<<<<<<< HEAD
   PetscCall(RDyMarkLocalCellsForAMR(rdy, ncells_local, refine_cell));
+=======
+  PetscCall(RDyMarkLocalCellsForRefinement(rdy, ncells_local, refine_cell));
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
 
   // free up memory
   PetscFree(xc_local);
@@ -175,9 +183,12 @@ int main(int argc, char *argv[]) {
     PetscCall(RDyCreate(comm, argv[1], &rdy));
     PetscCall(RDySetup(rdy));
 
+<<<<<<< HEAD
     // enable refinement
     PetscCall(RDyEnableAMR(rdy));
 
+=======
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
     RefinementDataset refinement_dataset;
     PetscCall(ParseRefinementDataOptions(&refinement_dataset));
 
@@ -189,6 +200,7 @@ int main(int argc, char *argv[]) {
     if (refinement_dataset.is_defined) {
       // determine the filename
       PetscCall(DetermineDatasetFilename(&refinement_dataset.current_date, refinement_dataset.dir, refinement_dataset.file));
+<<<<<<< HEAD
       if (!myrank) printf("refinement filename: %s\n", refinement_dataset.file);
       Vec global;
       PetscCall(RDyReadAMRScalarGlobalVecLevel0FromBinary(rdy, refinement_dataset.file, &global));
@@ -196,6 +208,15 @@ int main(int argc, char *argv[]) {
       PetscCall(MarkLocalCellsForRefinementBasedOnDataset(rdy, global));
       PetscCall(VecDestroy(&global));
       PetscCall(RDyPerformAMR(rdy));
+=======
+      printf("filename: %s\n", refinement_dataset.file);
+      Vec global;
+      PetscCall(RDyReadOneDOFBaseGlobalVecFromBinaryFile(rdy, refinement_dataset.file, &global));
+
+      PetscCall(MarkLocalCellsForRefinementBasedOnDataset(rdy, global));
+      PetscCall(VecDestroy(&global));
+      PetscCall(RDyRefine(rdy));
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
     }
 
     PetscCall(RDyAdvance(rdy));
@@ -210,10 +231,17 @@ int main(int argc, char *argv[]) {
         mktime(current_date);
 
         PetscCall(DetermineDatasetFilename(&refinement_dataset.current_date, refinement_dataset.dir, refinement_dataset.file));
+<<<<<<< HEAD
         if (!myrank) printf("refinement filename: %s\n", refinement_dataset.file);
         Vec global_base, global_current;
         PetscCall(RDyReadAMRScalarGlobalVecLevel0FromBinary(rdy, refinement_dataset.file, &global_base));
         PetscCall(RDyMapAMRScalarGlobalVecLevel0ToCurrentLevel(rdy, global_base, &global_current));
+=======
+        printf("filename: %s\n", refinement_dataset.file);
+        Vec global_base, global_current;
+        PetscCall(RDyReadOneDOFBaseGlobalVecFromBinaryFile(rdy, refinement_dataset.file, &global_base));
+        PetscCall(RDyMapOneDOFGlobalBaseVecToCurrentGlobalVec(rdy, global_base, &global_current));
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
         PetscCall(MarkLocalCellsForRefinementBasedOnDataset(rdy, global_current));
 
         PetscCall(VecDestroy(&global_base));
@@ -222,7 +250,11 @@ int main(int argc, char *argv[]) {
         PetscCall(MarkLocalCellsForRefinement(rdy));
       }
 
+<<<<<<< HEAD
       PetscCall(RDyPerformAMR(rdy));
+=======
+      PetscCall(RDyRefine(rdy));
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
       PetscCall(RDyAdvance(rdy));
     }
 

@@ -1297,8 +1297,13 @@ PetscErrorCode RDySetup(RDy rdy) {
 
   PetscCall(CreateAuxiliaryDMs(rdy));
 
+<<<<<<< HEAD
   rdy->amr.dm_base      = rdy->dm;
   rdy->amr.dm_1dof_base = rdy->dm_1dof;
+=======
+  rdy->dm_amr_base     = rdy->dm;
+  rdy->dm_1dof_amr_base = rdy->dm_1dof;
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
 
   if (rdy->config.physics.sediment.num_classes) {
     PetscCall(CreateFlowDM(rdy));

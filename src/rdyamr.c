@@ -8,6 +8,24 @@
 #include <private/rdymathimpl.h>
 #include <private/rdysweimpl.h>
 
+<<<<<<< HEAD:src/rdyamr.c
+=======
+static PetscErrorCode ProcessOptions(MPI_Comm comm, AppCtx *options) {
+  PetscMPIInt size;
+
+  PetscFunctionBeginUser;
+  options->adapt  = 1;
+  options->metric = PETSC_FALSE;
+  PetscCallMPI(MPI_Comm_size(comm, &size));
+
+  PetscOptionsBegin(comm, "", "Meshing Interpolation Test Options", "DMPLEX");
+  PetscCall(PetscOptionsInt("-adapt", "Number of adaptation steps mesh", "ex10.c", options->adapt, &options->adapt, NULL));
+  PetscCall(PetscOptionsBool("-metric", "Flag for metric refinement", "ex41.c", options->metric, &options->metric, NULL));
+  PetscOptionsEnd();
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
 static PetscErrorCode CreateAdaptLabelInternal(RDy rdy, DMLabel *adaptLabel) {
   /* PetscMPIInt rank; */
   DMLabel  label;
@@ -20,7 +38,11 @@ static PetscErrorCode CreateAdaptLabelInternal(RDy rdy, DMLabel *adaptLabel) {
   DM dm = rdy->dm;
   PetscCall(DMPlexGetHeightStratum(dm, 0, &cStart, &cEnd));
 
+<<<<<<< HEAD:src/rdyamr.c
   RDyMesh  *mesh  = &rdy->mesh;
+=======
+  RDyMesh *mesh = &rdy->mesh;
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
   RDyCells *cells = &mesh->cells;
 
   for (c = cStart; c < cEnd; ++c) {
@@ -43,31 +65,54 @@ static PetscErrorCode CreateAdaptLabelInternal(RDy rdy, DMLabel *adaptLabel) {
 /// @param size        The number of local cells
 /// @param refine_cell True/False array indicating if the cell should be refined
 /// @return PETSC_SUCESS on success
+<<<<<<< HEAD:src/rdyamr.c
 PetscErrorCode RDyMarkLocalCellsForAMR(RDy rdy, const PetscInt size, const PetscBool *refine_cell) {
   PetscFunctionBegin;
 
   rdy->amr.cells_marked_for_refinement = PETSC_TRUE;
+=======
+PetscErrorCode RDyMarkLocalCellsForRefinement (RDy rdy, const PetscInt size, const PetscBool *refine_cell) {
+  PetscFunctionBegin;
+
+  rdy->cells_marked_for_refinement = PETSC_TRUE;
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
 
   // check if the size of the array is equal to the number of local cells
   PetscAssert(rdy->mesh.num_owned_cells == size, PETSC_COMM_WORLD, PETSC_ERR_ARG_SIZ, "The size of array is not equal to the number of local cells");
 
   // copy the data
+<<<<<<< HEAD:src/rdyamr.c
   PetscCalloc1(size, &rdy->amr.refine_cell);
   for (PetscInt icell = 0; icell < size; ++icell) {
     rdy->amr.refine_cell[icell] = refine_cell[icell];
+=======
+  PetscCalloc1(size, &rdy->refine_cell);
+  for (PetscInt icell = 0; icell < size; ++icell) {
+    rdy->refine_cell[icell] = refine_cell[icell];
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
   }
 
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 /// @brief Creates a label to refine cells based on the data previously provided by call
+<<<<<<< HEAD:src/rdyamr.c
 ///        to RDyMarkLocalCellsForAMR
+=======
+///        to RDyMarkLocalCellsForRefinement
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
 /// @param rdy        RDy struct
 /// @param adaptLabel A DMLabel marks appropriate locally cells for refinement
 /// @return PETSC_SUCESS on success
 static PetscErrorCode CreateAdaptLabelFromMarkedCells(RDy rdy, DMLabel *adaptLabel) {
+<<<<<<< HEAD:src/rdyamr.c
   PetscFunctionBegin;
   DMLabel label;
+=======
+
+  PetscFunctionBegin;
+  DMLabel  label;
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
 
   PetscCall(DMLabelCreate(PETSC_COMM_SELF, "Adaptation Label", adaptLabel));
   label = *adaptLabel;
@@ -75,11 +120,19 @@ static PetscErrorCode CreateAdaptLabelFromMarkedCells(RDy rdy, DMLabel *adaptLab
   PetscInt cStart, cEnd;
   PetscCall(DMPlexGetHeightStratum(rdy->dm, 0, &cStart, &cEnd));
 
+<<<<<<< HEAD:src/rdyamr.c
   RDyMesh  *mesh  = &rdy->mesh;
   RDyCells *cells = &mesh->cells;
 
   for (PetscInt c = 0; c < mesh->num_owned_cells; ++c) {
     if (rdy->amr.refine_cell[c]) {
+=======
+  RDyMesh *mesh = &rdy->mesh;
+  RDyCells *cells = &mesh->cells;
+
+  for (PetscInt c = 0; c < mesh->num_owned_cells; ++c) {
+    if (rdy->refine_cell[c]) {
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
       PetscInt idx = cells->owned_to_local[c] + cStart;
       PetscCall(DMLabelSetValue(label, idx, DM_ADAPT_REFINE));
     }
@@ -158,8 +211,12 @@ static PetscErrorCode ConstructRefineTree(DM dm, Mat CoarseToFineMatNDof, Mat Fi
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+<<<<<<< HEAD:src/rdyamr.c
 static PetscErrorCode AdaptMesh(RDy rdy, const PetscInt bs, DM *dm_fine, Mat *CoarseToFineMatNDof, Mat *FineToCoarseMatNDof, Mat *CoarseToFineMat1Dof,
                                 Mat *FineToCoarseMat1Dof) {
+=======
+static PetscErrorCode AdaptMesh(RDy rdy, const PetscInt bs, DM *dm_fine, Mat *CoarseToFineMatNDof, Mat *FineToCoarseMatNDof, Mat *CoarseToFineMat1Dof, Mat *FineToCoarseMat1Dof, AppCtx *ctx) {
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
   PetscFunctionBeginUser;
 
   DM       dm = rdy->dm;
@@ -170,12 +227,21 @@ static PetscErrorCode AdaptMesh(RDy rdy, const PetscInt bs, DM *dm_fine, Mat *Co
 
   PetscCall(DMViewFromOptions(dm, NULL, "-adapt_pre_dm_view"));
 
+<<<<<<< HEAD:src/rdyamr.c
   if (!rdy->amr.cells_marked_for_refinement) {
     PetscCall(CreateAdaptLabelInternal(rdy, &adaptLabel));
   } else {
     PetscCall(CreateAdaptLabelFromMarkedCells(rdy, &adaptLabel));
     rdy->amr.cells_marked_for_refinement = PETSC_FALSE;
     PetscFree(rdy->amr.refine_cell);
+=======
+  if (!rdy->cells_marked_for_refinement) {
+    PetscCall(CreateAdaptLabelInternal(rdy, &adaptLabel));
+  } else {
+    PetscCall(CreateAdaptLabelFromMarkedCells(rdy, &adaptLabel));
+    rdy->cells_marked_for_refinement = PETSC_FALSE;
+    PetscFree(rdy->refine_cell);
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
   }
 
   PetscCall(DMPlexSetSaveTransform(dm, PETSC_TRUE));
@@ -452,7 +518,11 @@ static PetscErrorCode MatMultResuse(Mat *A, Mat *B, PetscBool update_B) {
   PetscFunctionBeginUser;
   Mat tmp;
 
+<<<<<<< HEAD:src/rdyamr.c
   PetscCall(MatMatMult(*A, *B, MAT_INITIAL_MATRIX, PETSC_DETERMINE, &tmp));
+=======
+  PetscCall(MatMatMult(*A, *B,  MAT_INITIAL_MATRIX, PETSC_DETERMINE, &tmp));
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
 
   if (update_B) {
     PetscCall(MatDestroy(B));
@@ -466,6 +536,7 @@ static PetscErrorCode MatMultResuse(Mat *A, Mat *B, PetscBool update_B) {
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+<<<<<<< HEAD:src/rdyamr.c
 PetscErrorCode RDyEnableAMR(RDy rdy) {
   PetscFunctionBeginUser;
 
@@ -480,6 +551,11 @@ PetscErrorCode RDyEnableAMR(RDy rdy) {
 }
 
 PetscErrorCode RDyPerformAMR(RDy rdy) {
+=======
+
+PetscErrorCode RDyRefine(RDy rdy) {
+  AppCtx   user;
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
   Mat      CoarseToFineMatNDof, FineToCoarseMatNDof;
   Mat      CoarseToFineMat1Dof, FineToCoarseMat1Dof;
   DM       dm_fine;
@@ -489,7 +565,11 @@ PetscErrorCode RDyPerformAMR(RDy rdy) {
   PetscCall(VecGetBlockSize(rdy->u_global, &ndof_coarse));
 
   /* Adapt */
+<<<<<<< HEAD:src/rdyamr.c
   PetscCall(AdaptMesh(rdy, ndof_coarse, &dm_fine, &CoarseToFineMatNDof, &FineToCoarseMatNDof, &CoarseToFineMat1Dof, &FineToCoarseMat1Dof));
+=======
+  PetscCall(AdaptMesh(rdy, ndof_coarse, &dm_fine, &CoarseToFineMatNDof, &FineToCoarseMatNDof, &CoarseToFineMat1Dof, &FineToCoarseMat1Dof, &user));
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
   PetscCall(DMLocalizeCoordinates(dm_fine));
   PetscCall(DMViewFromOptions(dm_fine, NULL, "-dm_fine_view"));
   PetscCall(DMSetCoarseDM(dm_fine, rdy->dm));
@@ -600,6 +680,7 @@ PetscErrorCode RDyPerformAMR(RDy rdy) {
   PetscCall(RDyDestroyVectors(&rdy));
 
   // keep a copy of base DMs, otherwise destroy the coarse DMs
+<<<<<<< HEAD:src/rdyamr.c
   if (!rdy->amr.num_refinements) {
     rdy->amr.dm_base      = rdy->dm;
     rdy->amr.dm_1dof_base = rdy->dm_1dof;
@@ -610,15 +691,35 @@ PetscErrorCode RDyPerformAMR(RDy rdy) {
     PetscCall(MatDuplicate(FineToCoarseMat1Dof, MAT_COPY_VALUES, &rdy->amr.CurrentToBaseMat1Dof));
 
   } else {
+=======
+  if (!rdy->num_refinements) {
+    rdy->dm_amr_base     = rdy->dm;
+    rdy->dm_1dof_amr_base = rdy->dm_1dof;
+
+    PetscCall(MatDuplicate(CoarseToFineMatNDof, MAT_COPY_VALUES, &rdy->BaseToCurrentMatNDof));
+    PetscCall(MatDuplicate(FineToCoarseMatNDof, MAT_COPY_VALUES, &rdy->CurrentToBaseMatNDof));
+    PetscCall(MatDuplicate(CoarseToFineMat1Dof, MAT_COPY_VALUES, &rdy->BaseToCurrentMat1Dof));
+    PetscCall(MatDuplicate(FineToCoarseMat1Dof, MAT_COPY_VALUES, &rdy->CurrentToBaseMat1Dof));
+
+  } else {
+
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
     // destroy the coarse DM
     PetscCall(DMDestroy(&rdy->dm));
     PetscCall(DMDestroy(&rdy->dm_diags));
     PetscCall(DMDestroy(&rdy->dm_1dof));
 
+<<<<<<< HEAD:src/rdyamr.c
     PetscCall(MatMultResuse(&CoarseToFineMatNDof, &rdy->amr.BaseToCurrentMatNDof, PETSC_TRUE));
     PetscCall(MatMultResuse(&rdy->amr.CurrentToBaseMatNDof, &FineToCoarseMatNDof, PETSC_FALSE));
     PetscCall(MatMultResuse(&CoarseToFineMat1Dof, &rdy->amr.BaseToCurrentMat1Dof, PETSC_TRUE));
     PetscCall(MatMultResuse(&rdy->amr.CurrentToBaseMat1Dof, &FineToCoarseMat1Dof, PETSC_FALSE));
+=======
+    PetscCall(MatMultResuse(&CoarseToFineMatNDof, &rdy->BaseToCurrentMatNDof, PETSC_TRUE));
+    PetscCall(MatMultResuse(&rdy->CurrentToBaseMatNDof, &FineToCoarseMatNDof, PETSC_FALSE));
+    PetscCall(MatMultResuse(&CoarseToFineMat1Dof, &rdy->BaseToCurrentMat1Dof, PETSC_TRUE));
+    PetscCall(MatMultResuse(&rdy->CurrentToBaseMat1Dof, &FineToCoarseMat1Dof, PETSC_FALSE));
+>>>>>>> 1b54ecc (Marks cells for refinement via files):src/rdyrefine.c
   }
 
   // set the DM to be the refined DM

@@ -272,6 +272,7 @@ PetscErrorCode RDyDestroy(RDy *rdy) {
   if ((*rdy)->dm_1dof) DMDestroy(&((*rdy)->dm_1dof));
   if ((*rdy)->dm) DMDestroy(&((*rdy)->dm));
 
+<<<<<<< HEAD
   if ((*rdy)->amr.num_refinements) {
     if ((*rdy)->amr.dm_base) DMDestroy(&((*rdy)->amr.dm_base));
     if ((*rdy)->amr.dm_1dof_base) DMDestroy(&((*rdy)->amr.dm_1dof_base));
@@ -280,6 +281,16 @@ PetscErrorCode RDyDestroy(RDy *rdy) {
     if ((*rdy)->amr.CurrentToBaseMatNDof) PetscCall(MatDestroy(&(*rdy)->amr.CurrentToBaseMatNDof));
     if ((*rdy)->amr.BaseToCurrentMat1Dof) PetscCall(MatDestroy(&(*rdy)->amr.BaseToCurrentMat1Dof));
     if ((*rdy)->amr.CurrentToBaseMat1Dof) PetscCall(MatDestroy(&(*rdy)->amr.CurrentToBaseMat1Dof));
+=======
+  if ((*rdy)->num_refinements) {
+    if ((*rdy)->dm_amr_base) DMDestroy(&((*rdy)->dm_amr_base));
+    if ((*rdy)->dm_1dof_amr_base) DMDestroy(&((*rdy)->dm_1dof_amr_base));
+
+    if ((*rdy)->BaseToCurrentMatNDof) PetscCall(MatDestroy(&(*rdy)->BaseToCurrentMatNDof));
+    if ((*rdy)->CurrentToBaseMatNDof) PetscCall(MatDestroy(&(*rdy)->CurrentToBaseMatNDof));
+    if ((*rdy)->BaseToCurrentMat1Dof) PetscCall(MatDestroy(&(*rdy)->BaseToCurrentMat1Dof));
+    if ((*rdy)->CurrentToBaseMat1Dof) PetscCall(MatDestroy(&(*rdy)->CurrentToBaseMat1Dof));
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
   }
 
   // destroy config data

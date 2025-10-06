@@ -42,9 +42,14 @@ PETSC_EXTERN PetscErrorCode RDyMMSEstimateConvergenceRates(RDy, PetscReal *, Pet
 PETSC_EXTERN PetscErrorCode RDyMMSRun(RDy);
 
 // RDycore support for AMR
+<<<<<<< HEAD
 PETSC_EXTERN PetscErrorCode RDyEnableAMR(RDy);
 PETSC_EXTERN PetscErrorCode RDyPerformAMR(RDy);
 PETSC_EXTERN PetscErrorCode RDyMarkLocalCellsForAMR(RDy, const PetscInt, const PetscBool *);
+=======
+PETSC_EXTERN PetscErrorCode RDyRefine(RDy);
+PETSC_EXTERN PetscErrorCode RDyMarkLocalCellsForRefinement(RDy, const PetscInt, const PetscBool *);
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
 
 // time integration
 PETSC_EXTERN PetscErrorCode DestroyOutputViewer(RDy);
@@ -118,8 +123,13 @@ PETSC_EXTERN PetscErrorCode RDySetInitialConditions(RDy rdy, Vec ic);
 PETSC_EXTERN PetscErrorCode RDyCreatePrognosticVec(RDy rdy, Vec *prog_vec);
 PETSC_EXTERN PetscErrorCode RDyReadOneDOFLocalVecFromBinaryFile(RDy rdy, const char *, Vec *local_vec);
 PETSC_EXTERN PetscErrorCode RDyReadOneDOFGlobalVecFromBinaryFile(RDy rdy, const char *, Vec *local_vec);
+<<<<<<< HEAD
 PETSC_EXTERN PetscErrorCode RDyReadAMRScalarGlobalVecLevel0FromBinary(RDy rdy, const char *, Vec *);
 PETSC_EXTERN PetscErrorCode RDyMapAMRScalarGlobalVecLevel0ToCurrentLevel(RDy rdy, Vec, Vec *);
+=======
+PETSC_EXTERN PetscErrorCode RDyReadOneDOFBaseGlobalVecFromBinaryFile(RDy rdy, const char *, Vec *);
+PETSC_EXTERN PetscErrorCode RDyMapOneDOFGlobalBaseVecToCurrentGlobalVec(RDy rdy, Vec, Vec *);
+>>>>>>> 1b54ecc (Marks cells for refinement via files)
 PETSC_EXTERN PetscErrorCode RDyWriteOneDOFGlobalVecToBinaryFile(RDy rdy, const char *, Vec *global);
 PETSC_EXTERN PetscErrorCode RDyCreateOneDOFGlobalVec(RDy rdy, Vec *global);
 
