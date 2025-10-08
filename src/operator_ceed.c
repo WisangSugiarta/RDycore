@@ -234,6 +234,402 @@ static PetscErrorCode CreateCeedInteriorFluxOperator(const RDyConfig config, RDy
   PetscFunctionReturn(CEED_ERROR_SUCCESS);
 }
 
+static PetscErrorCode CreateCeedInteriorFluxOperatorReconstruction(const RDyConfig config, RDyMesh *mesh, CeedOperator *ceed_op) {
+  PetscFunctionBeginUser;
+
+  Ceed ceed = CeedContext();
+  CeedInt num_flow_comp = 3;
+  RDyCells *cells = &mesh->cells;
+  RDyEdges *edges = &mesh->edges;
+
+  printf("DEBUG MESH INFO: Total cells = %d, Owned cells = %d, Internal edges = %d\n", 
+         mesh->num_cells, mesh->num_owned_cells, mesh->num_owned_internal_edges);
+
+  // ===== BUILD NEIGHBOR CONNECTIVITY FIRST =====
+  printf("DEBUG: Building neighbor connectivity from edges...\n");
+  
+  // First, reset neighbor counts to 0
+  for (CeedInt c = 0; c < mesh->num_cells; c++) {
+    cells->num_neighbors[c] = 0;
+  }
+  
+  // Count actual neighbors by examining edges
+  for (CeedInt e = 0; e < mesh->num_edges; e++) {
+    CeedInt left = edges->cell_ids[2 * e];
+    CeedInt right = edges->cell_ids[2 * e + 1];
+    
+    // Valid cell-to-cell edge (not boundary)
+    if (left >= 0 && left < mesh->num_cells && right >= 0 && right < mesh->num_cells) {
+      cells->num_neighbors[left]++;
+      cells->num_neighbors[right]++;
+    }
+  }
+  
+  // Now populate the actual neighbor IDs
+  CeedInt *neighbor_counters;
+  PetscCall(PetscCalloc1(mesh->num_cells, &neighbor_counters));
+  
+  for (CeedInt e = 0; e < mesh->num_edges; e++) {
+    CeedInt left = edges->cell_ids[2 * e];
+    CeedInt right = edges->cell_ids[2 * e + 1];
+    
+    if (left >= 0 && left < mesh->num_cells && right >= 0 && right < mesh->num_cells) {
+      // Add right as neighbor of left
+      CeedInt left_idx = cells->neighbor_offsets[left] + neighbor_counters[left];
+      cells->neighbor_ids[left_idx] = right;
+      neighbor_counters[left]++;
+      
+      // Add left as neighbor of right
+      CeedInt right_idx = cells->neighbor_offsets[right] + neighbor_counters[right];
+      cells->neighbor_ids[right_idx] = left;
+      neighbor_counters[right]++;
+    }
+  }
+  
+  PetscCall(PetscFree(neighbor_counters));
+  
+  // Debug: verify connectivity was built correctly
+  printf("DEBUG: Built neighbor connectivity - first 10 cells:\n");
+  for (CeedInt c = 0; c < 10 && c < mesh->num_cells; c++) {
+    printf("Cell %d has %d neighbors: ", c, cells->num_neighbors[c]);
+    for (CeedInt n = 0; n < cells->num_neighbors[c]; n++) {
+      CeedInt neighbor = cells->neighbor_ids[cells->neighbor_offsets[c] + n];
+      printf("%d ", neighbor);
+    }
+    printf("\n");
+  }
+
+  // ===== NOW SET UP CEED OPERATOR =====
+
+  // Create Q-function
+  CeedQFunction qf;
+  PetscCallCEED(CeedQFunctionCreateInterior(ceed, 1, SWEFluxReconstruction_Roe, SWEFluxReconstruction_Roe_loc, &qf));
+  
+  // Set context
+  CeedQFunctionContext qf_context;
+  PetscCall(CreateSWEQFunctionContext(ceed, config, &qf_context));
+  PetscCallCEED(CeedQFunctionSetContext(qf, qf_context));
+  PetscCallCEED(CeedQFunctionContextDestroy(&qf_context));
+
+  CeedInt num_edges = mesh->num_owned_internal_edges;
+  
+  // Component sizes - corrected to match kernel expectations
+  CeedInt num_comp_edge_data = 5;        // sn, cn, edge_length, edge_mid_x, edge_mid_y
+  CeedInt num_comp_cell_data = 6;        // xl, yl, Al, xr, yr, Ar
+  CeedInt num_comp_neighbor_coords = 16; // 4 neighbors * 2 coords per cell * 2 cells
+  CeedInt num_comp_neighbor_values = 24; // 4 neighbors * 3 components per cell * 2 cells
+  CeedInt num_comp_cnum = 2;
+
+  // Q-function inputs
+  PetscCallCEED(CeedQFunctionAddInput(qf, "edge_data", num_comp_edge_data, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddInput(qf, "cell_data", num_comp_cell_data, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddInput(qf, "neighbor_coords", num_comp_neighbor_coords, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddInput(qf, "neighbor_values", num_comp_neighbor_values, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddInput(qf, "q_left", num_flow_comp, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddInput(qf, "q_right", num_flow_comp, CEED_EVAL_NONE));
+  
+  // Q-function outputs
+  PetscCallCEED(CeedQFunctionAddOutput(qf, "cell_left", num_flow_comp, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddOutput(qf, "cell_right", num_flow_comp, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddOutput(qf, "flux", num_flow_comp, CEED_EVAL_NONE));
+  PetscCallCEED(CeedQFunctionAddOutput(qf, "courant_number", num_comp_cnum, CEED_EVAL_NONE));
+
+  // Create vectors and restrictions
+  CeedElemRestriction restrict_edge_data, restrict_cell_data, restrict_neighbor_coords, restrict_neighbor_values;
+  CeedElemRestriction restrict_q_l, restrict_q_r, restrict_cell_l, restrict_cell_r;
+  CeedElemRestriction restrict_flux, restrict_cnum;
+  CeedVector edge_data, cell_data, neighbor_coords, flux, cnum;
+
+  // 1. Edge data (static) - CORRECTED to 5 components
+  {
+    CeedInt strides[] = {num_comp_edge_data, 1, num_comp_edge_data};
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, num_comp_edge_data,
+                                                   num_edges * num_comp_edge_data, strides, &restrict_edge_data));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_edge_data, &edge_data, NULL));
+    PetscCallCEED(CeedVectorSetValue(edge_data, 0.0));
+    
+    CeedScalar(*ed)[5];
+    PetscCallCEED(CeedVectorGetArray(edge_data, CEED_MEM_HOST, (CeedScalar **)&ed));
+    for (CeedInt e = 0, owned_edge = 0; e < mesh->num_internal_edges; e++) {
+      CeedInt iedge = edges->internal_edge_ids[e];
+      if (!edges->is_owned[iedge]) continue;
+      
+      ed[owned_edge][0] = edges->sn[iedge];
+      ed[owned_edge][1] = edges->cn[iedge];
+      ed[owned_edge][2] = edges->lengths[iedge];
+      ed[owned_edge][3] = edges->centroids[iedge].X[0];
+      ed[owned_edge][4] = edges->centroids[iedge].X[1];
+      owned_edge++;
+    }
+    PetscCallCEED(CeedVectorRestoreArray(edge_data, (CeedScalar **)&ed));
+  }
+
+  // 2. Cell data per edge (static)
+  {
+    CeedInt strides[] = {num_comp_cell_data, 1, num_comp_cell_data};
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, num_comp_cell_data,
+                                                   num_edges * num_comp_cell_data, strides, &restrict_cell_data));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_cell_data, &cell_data, NULL));
+    PetscCallCEED(CeedVectorSetValue(cell_data, 0.0));
+    
+    CeedScalar(*cd)[6];
+    PetscCallCEED(CeedVectorGetArray(cell_data, CEED_MEM_HOST, (CeedScalar **)&cd));
+    for (CeedInt e = 0, owned_edge = 0; e < mesh->num_internal_edges; e++) {
+      CeedInt iedge = edges->internal_edge_ids[e];
+      if (!edges->is_owned[iedge]) continue;
+      
+      CeedInt l = edges->cell_ids[2 * iedge];
+      CeedInt r = edges->cell_ids[2 * iedge + 1];
+      
+      cd[owned_edge][0] = cells->centroids[l].X[0];
+      cd[owned_edge][1] = cells->centroids[l].X[1];
+      cd[owned_edge][2] = cells->areas[l];
+      cd[owned_edge][3] = cells->centroids[r].X[0];
+      cd[owned_edge][4] = cells->centroids[r].X[1];
+      cd[owned_edge][5] = cells->areas[r];
+      owned_edge++;
+    }
+    PetscCallCEED(CeedVectorRestoreArray(cell_data, (CeedScalar **)&cd));
+  }
+
+  // 3. Neighbor coordinates per edge (static)
+  {
+    CeedInt strides[] = {num_comp_neighbor_coords, 1, num_comp_neighbor_coords};
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, num_comp_neighbor_coords,
+                                                   num_edges * num_comp_neighbor_coords, strides, &restrict_neighbor_coords));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_neighbor_coords, &neighbor_coords, NULL));
+    PetscCallCEED(CeedVectorSetValue(neighbor_coords, 0.0));
+    
+    CeedScalar(*nc)[16];
+    PetscCallCEED(CeedVectorGetArray(neighbor_coords, CEED_MEM_HOST, (CeedScalar **)&nc));
+    
+    for (CeedInt e = 0, owned_edge = 0; e < mesh->num_internal_edges; e++) {
+      CeedInt iedge = edges->internal_edge_ids[e];
+      if (!edges->is_owned[iedge]) continue;
+      
+      CeedInt l = edges->cell_ids[2 * iedge];
+      CeedInt r = edges->cell_ids[2 * iedge + 1];
+      
+      // CONNECTIVITY DEBUG (first 10 edges only)
+      if (owned_edge < 10) {
+        printf("DEBUG CONNECTIVITY: Edge %d, l=%d, r=%d\n", owned_edge, l, r);
+        
+        // Count non-boundary neighbors
+        int l_interior_neighbors = 0, r_interior_neighbors = 0;
+        for (CeedInt n = 0; n < cells->num_neighbors[l]; n++) {
+          if (cells->neighbor_ids[cells->neighbor_offsets[l] + n] >= 0) l_interior_neighbors++;
+        }
+        for (CeedInt n = 0; n < cells->num_neighbors[r]; n++) {
+          if (cells->neighbor_ids[cells->neighbor_offsets[r] + n] >= 0) r_interior_neighbors++;
+        }
+        printf("DEBUG CONNECTIVITY: Interior neighbors: l=%d, r=%d\n", l_interior_neighbors, r_interior_neighbors);
+      }
+      
+      // Pack neighbor coordinates for left cell (first 8 components) 
+      CeedInt valid_left_neighbors = 0;
+      for (CeedInt n = 0; n < cells->num_neighbors[l] && valid_left_neighbors < 4; n++) {
+        CeedInt neighbor = cells->neighbor_ids[cells->neighbor_offsets[l] + n];
+        
+        // Skip boundary neighbors (ID = -1)
+        if (neighbor >= 0 && neighbor < mesh->num_cells) {
+          nc[owned_edge][2*valid_left_neighbors] = cells->centroids[neighbor].X[0];
+          nc[owned_edge][2*valid_left_neighbors+1] = cells->centroids[neighbor].X[1];
+          valid_left_neighbors++;
+        }
+      }
+      
+      // Fill remaining slots with zeros if we have fewer than 4 valid neighbors
+      for (CeedInt n = valid_left_neighbors; n < 4; n++) {
+        nc[owned_edge][2*n] = 0.0;
+        nc[owned_edge][2*n+1] = 0.0;
+      }
+      
+      // Pack neighbor coordinates for right cell (last 8 components)
+      CeedInt valid_right_neighbors = 0;
+      for (CeedInt n = 0; n < cells->num_neighbors[r] && valid_right_neighbors < 4; n++) {
+        CeedInt neighbor = cells->neighbor_ids[cells->neighbor_offsets[r] + n];
+        
+        // Skip boundary neighbors (ID = -1)
+        if (neighbor >= 0 && neighbor < mesh->num_cells) {
+          nc[owned_edge][8 + 2*valid_right_neighbors] = cells->centroids[neighbor].X[0];
+          nc[owned_edge][8 + 2*valid_right_neighbors+1] = cells->centroids[neighbor].X[1];
+          valid_right_neighbors++;
+        }
+      }
+      
+      // Fill remaining slots with zeros
+      for (CeedInt n = valid_right_neighbors; n < 4; n++) {
+        nc[owned_edge][8 + 2*n] = 0.0;
+        nc[owned_edge][8 + 2*n+1] = 0.0;
+      }
+      
+      owned_edge++;
+    }
+    
+    PetscCallCEED(CeedVectorRestoreArray(neighbor_coords, (CeedScalar **)&nc));
+  }
+
+  // 4. Create neighbor values restriction (active) - CORRECTED dummy data
+  {
+    CeedInt *neighbor_offsets;
+    PetscCall(PetscMalloc1(num_edges * num_comp_neighbor_values, &neighbor_offsets));
+    
+    CeedInt offset_idx = 0;
+    for (CeedInt e = 0, owned_edge = 0; e < mesh->num_internal_edges; e++) {
+      CeedInt iedge = edges->internal_edge_ids[e];
+      if (!edges->is_owned[iedge]) continue;
+      
+      CeedInt l = edges->cell_ids[2 * iedge];
+      CeedInt r = edges->cell_ids[2 * iedge + 1];
+      
+      // Pack neighbor offsets for left cell (first 12 components: 4 neighbors * 3 components)
+      CeedInt valid_left_neighbors = 0;
+      for (CeedInt n = 0; n < cells->num_neighbors[l] && valid_left_neighbors < 4; n++) {
+        CeedInt neighbor = cells->neighbor_ids[cells->neighbor_offsets[l] + n];
+        
+        if (neighbor >= 0 && neighbor < mesh->num_cells) {
+          // Valid neighbor - point to its solution data
+          neighbor_offsets[offset_idx++] = neighbor * num_flow_comp;     // h
+          neighbor_offsets[offset_idx++] = neighbor * num_flow_comp + 1; // hu
+          neighbor_offsets[offset_idx++] = neighbor * num_flow_comp + 2; // hv
+          valid_left_neighbors++;
+        }
+      }
+      
+      // Fill remaining slots with cell's own data (makes limiting fall back to first-order)
+      for (CeedInt n = valid_left_neighbors; n < 4; n++) {
+        neighbor_offsets[offset_idx++] = l * num_flow_comp;     // h of left cell
+        neighbor_offsets[offset_idx++] = l * num_flow_comp + 1; // hu of left cell
+        neighbor_offsets[offset_idx++] = l * num_flow_comp + 2; // hv of left cell
+      }
+      
+      // Pack neighbor offsets for right cell (last 12 components)
+      CeedInt valid_right_neighbors = 0;
+      for (CeedInt n = 0; n < cells->num_neighbors[r] && valid_right_neighbors < 4; n++) {
+        CeedInt neighbor = cells->neighbor_ids[cells->neighbor_offsets[r] + n];
+        
+        if (neighbor >= 0 && neighbor < mesh->num_cells) {
+          neighbor_offsets[offset_idx++] = neighbor * num_flow_comp;     
+          neighbor_offsets[offset_idx++] = neighbor * num_flow_comp + 1; 
+          neighbor_offsets[offset_idx++] = neighbor * num_flow_comp + 2; 
+          valid_right_neighbors++;
+        }
+      }
+      
+      // Fill remaining slots with cell's own data
+      for (CeedInt n = valid_right_neighbors; n < 4; n++) {
+        neighbor_offsets[offset_idx++] = r * num_flow_comp;
+        neighbor_offsets[offset_idx++] = r * num_flow_comp + 1;
+        neighbor_offsets[offset_idx++] = r * num_flow_comp + 2;
+      }
+      
+      owned_edge++;
+    }
+    
+    PetscCallCEED(CeedElemRestrictionCreate(ceed, num_edges, 1, num_comp_neighbor_values, 1,
+                                            mesh->num_cells * num_flow_comp, CEED_MEM_HOST,
+                                            CEED_COPY_VALUES, neighbor_offsets, &restrict_neighbor_values));
+    PetscCall(PetscFree(neighbor_offsets));
+  }
+
+  // 5. Create input restrictions for left/right solutions
+  {
+    CeedInt *q_offset_l, *q_offset_r;
+    PetscCall(PetscMalloc2(num_edges, &q_offset_l, num_edges, &q_offset_r));
+    
+    for (CeedInt e = 0, owned_edge = 0; e < mesh->num_internal_edges; e++) {
+      CeedInt iedge = edges->internal_edge_ids[e];
+      if (!edges->is_owned[iedge]) continue;
+      CeedInt l = edges->cell_ids[2 * iedge];
+      CeedInt r = edges->cell_ids[2 * iedge + 1];
+      q_offset_l[owned_edge] = l * num_flow_comp;
+      q_offset_r[owned_edge] = r * num_flow_comp;
+      owned_edge++;
+    }
+    
+    PetscCallCEED(CeedElemRestrictionCreate(ceed, num_edges, 1, num_flow_comp, 1,
+                                            mesh->num_cells * num_flow_comp, CEED_MEM_HOST,
+                                            CEED_COPY_VALUES, q_offset_l, &restrict_q_l));
+    PetscCallCEED(CeedElemRestrictionCreate(ceed, num_edges, 1, num_flow_comp, 1,
+                                            mesh->num_cells * num_flow_comp, CEED_MEM_HOST,
+                                            CEED_COPY_VALUES, q_offset_r, &restrict_q_r));
+    PetscCall(PetscFree2(q_offset_l, q_offset_r));
+  }
+
+  // 6. Output restrictions
+  {
+    CeedInt *c_offset_l, *c_offset_r;
+    PetscCall(PetscMalloc2(num_edges, &c_offset_l, num_edges, &c_offset_r));
+    
+    for (CeedInt e = 0, owned_edge = 0; e < mesh->num_internal_edges; e++) {
+      CeedInt iedge = edges->internal_edge_ids[e];
+      if (!edges->is_owned[iedge]) continue;
+      CeedInt l = edges->cell_ids[2 * iedge];
+      CeedInt r = edges->cell_ids[2 * iedge + 1];
+      c_offset_l[owned_edge] = cells->local_to_owned[l] * num_flow_comp;
+      c_offset_r[owned_edge] = cells->local_to_owned[r] * num_flow_comp;
+      owned_edge++;
+    }
+    
+    PetscCallCEED(CeedElemRestrictionCreate(ceed, num_edges, 1, num_flow_comp, 1,
+                                            mesh->num_cells * num_flow_comp, CEED_MEM_HOST,
+                                            CEED_COPY_VALUES, c_offset_l, &restrict_cell_l));
+    PetscCallCEED(CeedElemRestrictionCreate(ceed, num_edges, 1, num_flow_comp, 1,
+                                            mesh->num_cells * num_flow_comp, CEED_MEM_HOST,
+                                            CEED_COPY_VALUES, c_offset_r, &restrict_cell_r));
+    PetscCall(PetscFree2(c_offset_l, c_offset_r));
+  }
+
+  // 7. Flux and courant output vectors
+  {
+    CeedInt f_strides[] = {num_flow_comp, 1, num_flow_comp};
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, num_flow_comp,
+                                                   num_edges * num_flow_comp, f_strides, &restrict_flux));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_flux, &flux, NULL));
+    PetscCallCEED(CeedVectorSetValue(flux, 0.0));
+
+    CeedInt c_strides[] = {num_comp_cnum, 1, num_comp_cnum};
+    PetscCallCEED(CeedElemRestrictionCreateStrided(ceed, num_edges, 1, num_comp_cnum,
+                                                   num_edges * num_comp_cnum, c_strides, &restrict_cnum));
+    PetscCallCEED(CeedElemRestrictionCreateVector(restrict_cnum, &cnum, NULL));
+    PetscCallCEED(CeedVectorSetValue(cnum, 0.0));
+  }
+
+  // 8. Create operator and set fields
+  PetscCallCEED(CeedOperatorCreate(ceed, qf, NULL, NULL, ceed_op));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "edge_data", restrict_edge_data, CEED_BASIS_NONE, edge_data));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "cell_data", restrict_cell_data, CEED_BASIS_NONE, cell_data));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "neighbor_coords", restrict_neighbor_coords, CEED_BASIS_NONE, neighbor_coords));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "neighbor_values", restrict_neighbor_values, CEED_BASIS_NONE, CEED_VECTOR_ACTIVE));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "q_left", restrict_q_l, CEED_BASIS_NONE, CEED_VECTOR_ACTIVE));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "q_right", restrict_q_r, CEED_BASIS_NONE, CEED_VECTOR_ACTIVE));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "cell_left", restrict_cell_l, CEED_BASIS_NONE, CEED_VECTOR_ACTIVE));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "cell_right", restrict_cell_r, CEED_BASIS_NONE, CEED_VECTOR_ACTIVE));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "flux", restrict_flux, CEED_BASIS_NONE, flux));
+  PetscCallCEED(CeedOperatorSetField(*ceed_op, "courant_number", restrict_cnum, CEED_BASIS_NONE, cnum));
+
+  // 9. Cleanup
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_edge_data));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_cell_data));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_neighbor_coords));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_neighbor_values));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_q_l));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_q_r));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_cell_l));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_cell_r));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_flux));
+  PetscCallCEED(CeedElemRestrictionDestroy(&restrict_cnum));
+  PetscCallCEED(CeedVectorDestroy(&edge_data));
+  PetscCallCEED(CeedVectorDestroy(&cell_data));
+  PetscCallCEED(CeedVectorDestroy(&neighbor_coords));
+  PetscCallCEED(CeedVectorDestroy(&flux));
+  PetscCallCEED(CeedVectorDestroy(&cnum));
+  PetscCallCEED(CeedQFunctionDestroy(&qf));
+
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+
 static PetscErrorCode CreateBoundaryFluxQFunction(Ceed ceed, const RDyConfig config, RDyBoundary boundary, RDyCondition boundary_condition,
                                                   CeedQFunction *qf) {
   PetscFunctionBeginUser;
@@ -494,6 +890,37 @@ PetscErrorCode CreateCeedFluxOperator(RDyConfig *config, RDyMesh *mesh, PetscInt
   }
   PetscFunctionReturn(PETSC_SUCCESS);
 }
+
+PetscErrorCode CreateCeedFluxOperatorReconstructed(RDyConfig *config, RDyMesh *mesh, 
+                                                   PetscInt num_boundaries, RDyBoundary *boundaries,
+                                                   RDyCondition *boundary_conditions, CeedOperator *flux_op) {
+  PetscFunctionBegin;
+
+  Ceed ceed = CeedContext();
+
+  PetscCall(CeedCompositeOperatorCreate(ceed, flux_op));
+
+  if (config->physics.flow.mode != FLOW_SWE) {
+    PetscCheck(PETSC_FALSE, PETSC_COMM_WORLD, PETSC_ERR_USER, "SWE is the only supported flow model!");
+  }
+  printf("DEBUG: Using slope reconstruction at Ceed Flux Op\n");
+  // Create interior flux operator with reconstruction
+  CeedOperator interior_flux_op;
+  PetscCall(CreateCeedInteriorFluxOperatorReconstruction(*config, mesh, &interior_flux_op));
+  PetscCall(CeedCompositeOperatorAddSub(*flux_op, interior_flux_op));
+
+  // Could be enhanced later to use reconstructed values at boundaries too
+  for (CeedInt b = 0; b < num_boundaries; ++b) {
+    CeedOperator boundary_flux_op;
+    RDyBoundary  boundary  = boundaries[b];
+    RDyCondition condition = boundary_conditions[b];
+    PetscCall(CreateCeedBoundaryFluxOperator(*config, mesh, boundary, condition, &boundary_flux_op));
+    PetscCall(CeedCompositeOperatorAddSub(*flux_op, boundary_flux_op));
+  }
+  
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 
 static PetscErrorCode CreateSourceQFunction(Ceed ceed, const RDyConfig config, CeedQFunction *qf) {
   PetscFunctionBeginUser;
