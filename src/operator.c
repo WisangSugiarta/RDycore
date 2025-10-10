@@ -168,6 +168,7 @@ static PetscErrorCode AddOperatorFluxDivergence(Operator *op) {
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+
 /// Creates an operator representing the system of equations described in the
 /// given configuration.
 /// @param [in]  config              the configuration defining the physics and numerics for the new operator
