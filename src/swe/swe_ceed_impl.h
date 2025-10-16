@@ -97,7 +97,7 @@ CEED_QFUNCTION(SWEFlux_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], 
   return SWEFlux(ctx, Q, in, out, RIEMANN_FLUX_ROE);
 }
 
-// SWE interior flux operator Q-function with slope reconstruction - DEBUG VERSION
+// SWE interior flux operator Q-function with slope reconstruction
 CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q, 
                                                      const CeedScalar *const in[], 
                                                      CeedScalar *const out[]) {
@@ -119,10 +119,6 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
   const CeedScalar dt = context->dtime;
   const CeedScalar h_anuga = context->h_anuga_regular;
 
-  static int check_count = 0;
-  static int call_count = 0;
-  call_count++;
-
   for (CeedInt i = 0; i < Q; i++) {
     CeedScalar sn = edge_data[0][i];
     CeedScalar cn = edge_data[1][i];
@@ -135,64 +131,6 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
     
     CeedScalar qL[3] = {q_left[0][i], q_left[1][i], q_left[2][i]};
     CeedScalar qR[3] = {q_right[0][i], q_right[1][i], q_right[2][i]};
-    
-    // ===== DETAILED DEBUG: Print raw component data =====
-    if (check_count < 5 && call_count <= 2) {
-      printf("\n========== EDGE %d, CALL %d ==========\n", i, call_count);
-      printf("Left cell at (%.3f, %.3f): h=%.6e, hu=%.6e, hv=%.6e\n", 
-             xl, yl, qL[0], qL[1], qL[2]);
-      printf("Right cell at (%.3f, %.3f): h=%.6e, hu=%.6e, hv=%.6e\n", 
-             xr, yr, qR[0], qR[1], qR[2]);
-      
-      printf("\n--- RAW NEIGHBOR_COORDS DATA (all 16 components) ---\n");
-      for (CeedInt comp = 0; comp < 16; comp++) {
-        printf("  neighbor_coords[%2d][%d] = %.6e\n", comp, i, neighbor_coords[comp][i]);
-      }
-      
-      printf("\n--- RAW NEIGHBOR_VALUES DATA (all 24 components) ---\n");
-      for (CeedInt comp = 0; comp < 24; comp++) {
-        printf("  neighbor_values[%2d][%d] = %.6e\n", comp, i, neighbor_values[comp][i]);
-      }
-      
-      printf("\n--- INTERPRETED LEFT CELL NEIGHBORS (components 0-11) ---\n");
-      for (CeedInt n = 0; n < 4; n++) {
-        CeedScalar nx = neighbor_coords[2*n][i];
-        CeedScalar ny = neighbor_coords[2*n+1][i];
-        CeedScalar h = neighbor_values[n*3 + 0][i];
-        CeedScalar hu = neighbor_values[n*3 + 1][i];
-        CeedScalar hv = neighbor_values[n*3 + 2][i];
-        
-        printf("  Left Neighbor %d: coords[%d,%d]=>(%.3f, %.3f), values[%d,%d,%d]=>(h=%.6e, hu=%.6e, hv=%.6e)\n",
-               n, 2*n, 2*n+1, nx, ny, n*3, n*3+1, n*3+2, h, hu, hv);
-        
-        if (fabs(nx - xr) < 1e-6 && fabs(ny - yr) < 1e-6) {
-          printf("    ^^ THIS SHOULD BE RIGHT CELL: actual=(%.6e, %.6e, %.6e), MATCH=%s\n",
-                 qR[0], qR[1], qR[2],
-                 (fabs(h-qR[0])<1e-10 && fabs(hu-qR[1])<1e-10 && fabs(hv-qR[2])<1e-10) ? "YES" : "NO");
-        }
-      }
-      
-      printf("\n--- INTERPRETED RIGHT CELL NEIGHBORS (components 12-23) ---\n");
-      for (CeedInt n = 0; n < 4; n++) {
-        CeedScalar nx = neighbor_coords[8 + 2*n][i];
-        CeedScalar ny = neighbor_coords[8 + 2*n+1][i];
-        CeedScalar h = neighbor_values[12 + n*3 + 0][i];
-        CeedScalar hu = neighbor_values[12 + n*3 + 1][i];
-        CeedScalar hv = neighbor_values[12 + n*3 + 2][i];
-        
-        printf("  Right Neighbor %d: coords[%d,%d]=>(%.3f, %.3f), values[%d,%d,%d]=>(h=%.6e, hu=%.6e, hv=%.6e)\n",
-               n, 8+2*n, 8+2*n+1, nx, ny, 12+n*3, 12+n*3+1, 12+n*3+2, h, hu, hv);
-        
-        if (fabs(nx - xl) < 1e-6 && fabs(ny - yl) < 1e-6) {
-          printf("    ^^ THIS SHOULD BE LEFT CELL: actual=(%.6e, %.6e, %.6e), MATCH=%s\n",
-                 qL[0], qL[1], qL[2],
-                 (fabs(h-qL[0])<1e-10 && fabs(hu-qL[1])<1e-10 && fabs(hv-qL[2])<1e-10) ? "YES" : "NO");
-        }
-      }
-      
-      printf("========================================\n\n");
-      check_count++;
-    }
     
     // Initialize reconstructed values to cell averages (0th order fallback)
     CeedScalar qL_recon[3] = {qL[0], qL[1], qL[2]};
