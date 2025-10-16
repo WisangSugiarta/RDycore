@@ -132,11 +132,10 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
     CeedScalar qL[3] = {q_left[0][i], q_left[1][i], q_left[2][i]};
     CeedScalar qR[3] = {q_right[0][i], q_right[1][i], q_right[2][i]};
     
-    // Initialize reconstructed values to cell averages (0th order fallback)
+    // Initialize reconstructed values to cell averages (first order fallback)
     CeedScalar qL_recon[3] = {qL[0], qL[1], qL[2]};
     CeedScalar qR_recon[3] = {qR[0], qR[1], qR[2]};
     
-    // ==================== MUSCL RECONSTRUCTION ====================
     // Only reconstruct if we have valid neighbor data
     int has_left_neighbors = 0;
     int has_right_neighbors = 0;
@@ -267,7 +266,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
       }
     }
     
-    // ==================== COMPUTE FLUX ====================
+    // compute fluxes using reconstructed states
     CeedScalar f[3], amax;
     if (qL_recon[0] > tiny_h || qR_recon[0] > tiny_h) {
       SWERiemannFlux_Roe(gravity, tiny_h, h_anuga,
@@ -435,6 +434,9 @@ CEED_QFUNCTION_HELPER int SWEBoundaryFlux_Outflow(void *ctx, CeedInt Q, const Ce
   }
   return 0;
 }
+
+
+
 
 CEED_QFUNCTION(SWEBoundaryFlux_Outflow_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[]) {
   return SWEBoundaryFlux_Outflow(ctx, Q, in, out, RIEMANN_FLUX_ROE);
