@@ -98,6 +98,7 @@ CEED_QFUNCTION(SWEFlux_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], 
 }
 
 // SWE interior flux operator Q-function with slope reconstruction
+// Now with positivity preservation and diagnostics
 CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q, 
                                                      const CeedScalar *const in[], 
                                                      CeedScalar *const out[]) {
@@ -119,6 +120,14 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
   const CeedScalar dt = context->dtime;
   const CeedScalar h_anuga = context->h_anuga_regular;
 
+  // Diagnostics counters
+  CeedInt total_edges = 0;
+  CeedInt second_order_left = 0;
+  CeedInt second_order_right = 0;
+  CeedInt limiter_activated_left = 0;
+  CeedInt limiter_activated_right = 0;
+  CeedScalar max_courant = 0.0;
+
   for (CeedInt i = 0; i < Q; i++) {
     CeedScalar sn = edge_data[0][i];
     CeedScalar cn = edge_data[1][i];
@@ -135,6 +144,10 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
     // Initialize reconstructed values to cell averages (first order fallback)
     CeedScalar qL_recon[3] = {qL[0], qL[1], qL[2]};
     CeedScalar qR_recon[3] = {qR[0], qR[1], qR[2]};
+    
+    total_edges++;
+    int used_second_order_left = 0;
+    int used_second_order_right = 0;
     
     // Only reconstruct if we have valid neighbor data
     int has_left_neighbors = 0;
@@ -167,6 +180,9 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
       CeedScalar grad_hv[2] = {0.0, 0.0};
       
       CeedInt n_valid = 0;
+      CeedScalar h_min = qL[0];
+      CeedScalar h_max = qL[0];
+      
       for (CeedInt n = 0; n < 4; n++) {
         CeedScalar nx = neighbor_coords[2*n][i];
         CeedScalar ny = neighbor_coords[2*n+1][i];
@@ -176,6 +192,9 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
           CeedScalar h_n = neighbor_values[n*3 + 0][i];
           CeedScalar hu_n = neighbor_values[n*3 + 1][i];
           CeedScalar hv_n = neighbor_values[n*3 + 2][i];
+          
+          h_min = (h_n < h_min) ? h_n : h_min;
+          h_max = (h_n > h_max) ? h_n : h_max;
           
           CeedScalar dx = nx - xl;
           CeedScalar dy = ny - yl;
@@ -201,14 +220,49 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
         CeedScalar dx_edge = edge_mid_x - xl;
         CeedScalar dy_edge = edge_mid_y - yl;
         
-        qL_recon[0] = qL[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
-        qL_recon[1] = qL[1] + grad_hu[0] * dx_edge + grad_hu[1] * dy_edge;
-        qL_recon[2] = qL[2] + grad_hv[0] * dx_edge + grad_hv[1] * dy_edge;
+        CeedScalar h_recon_trial = qL[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
         
-        if (qL_recon[0] < 0.0) {
+        // Positivity-preserving limiter: ensure h stays within [h_min, h_max]
+        CeedScalar alpha = 1.0;
+        if (h_recon_trial < tiny_h) {
+          // Need to reduce slope to maintain positivity
+          CeedScalar grad_dot_dx = grad_h[0] * dx_edge + grad_h[1] * dy_edge;
+          if (fabs(grad_dot_dx) > 1e-14) {
+            alpha = (tiny_h - qL[0]) / grad_dot_dx;
+            alpha = (alpha < 0.0) ? 0.0 : alpha;
+            alpha = (alpha > 1.0) ? 1.0 : alpha;
+          } else {
+            alpha = 0.0;
+          }
+          limiter_activated_left++;
+        } else {
+          // Additional bounds-preserving limiter
+          CeedScalar grad_dot_dx = grad_h[0] * dx_edge + grad_h[1] * dy_edge;
+          if (grad_dot_dx > 0.0 && h_recon_trial > h_max) {
+            alpha = (h_max - qL[0]) / grad_dot_dx;
+            limiter_activated_left++;
+          } else if (grad_dot_dx < 0.0 && h_recon_trial < h_min) {
+            alpha = (h_min - qL[0]) / grad_dot_dx;
+            limiter_activated_left++;
+          }
+          alpha = (alpha < 0.0) ? 0.0 : alpha;
+          alpha = (alpha > 1.0) ? 1.0 : alpha;
+        }
+        
+        // Apply limiter to all variables
+        qL_recon[0] = qL[0] + alpha * (grad_h[0] * dx_edge + grad_h[1] * dy_edge);
+        qL_recon[1] = qL[1] + alpha * (grad_hu[0] * dx_edge + grad_hu[1] * dy_edge);
+        qL_recon[2] = qL[2] + alpha * (grad_hv[0] * dx_edge + grad_hv[1] * dy_edge);
+        
+        // Final safety check
+        if (qL_recon[0] < tiny_h) {
           qL_recon[0] = qL[0];
           qL_recon[1] = qL[1];
           qL_recon[2] = qL[2];
+        } else if (alpha > 0.1) {
+          // Consider it second-order if limiter didn't reduce too much
+          used_second_order_left = 1;
+          second_order_left++;
         }
       }
     }
@@ -220,6 +274,9 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
       CeedScalar grad_hv[2] = {0.0, 0.0};
       
       CeedInt n_valid = 0;
+      CeedScalar h_min = qR[0];
+      CeedScalar h_max = qR[0];
+      
       for (CeedInt n = 0; n < 4; n++) {
         CeedScalar nx = neighbor_coords[8 + 2*n][i];
         CeedScalar ny = neighbor_coords[8 + 2*n+1][i];
@@ -229,6 +286,9 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
           CeedScalar h_n = neighbor_values[12 + n*3 + 0][i];
           CeedScalar hu_n = neighbor_values[12 + n*3 + 1][i];
           CeedScalar hv_n = neighbor_values[12 + n*3 + 2][i];
+          
+          h_min = (h_n < h_min) ? h_n : h_min;
+          h_max = (h_n > h_max) ? h_n : h_max;
           
           CeedScalar dx = nx - xr;
           CeedScalar dy = ny - yr;
@@ -254,19 +314,52 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
         CeedScalar dx_edge = edge_mid_x - xr;
         CeedScalar dy_edge = edge_mid_y - yr;
         
-        qR_recon[0] = qR[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
-        qR_recon[1] = qR[1] + grad_hu[0] * dx_edge + grad_hu[1] * dy_edge;
-        qR_recon[2] = qR[2] + grad_hv[0] * dx_edge + grad_hv[1] * dy_edge;
+        CeedScalar h_recon_trial = qR[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
         
-        if (qR_recon[0] < 0.0) {
+        // Positivity-preserving limiter
+        CeedScalar alpha = 1.0;
+        if (h_recon_trial < tiny_h) {
+          CeedScalar grad_dot_dx = grad_h[0] * dx_edge + grad_h[1] * dy_edge;
+          if (fabs(grad_dot_dx) > 1e-14) {
+            alpha = (tiny_h - qR[0]) / grad_dot_dx;
+            alpha = (alpha < 0.0) ? 0.0 : alpha;
+            alpha = (alpha > 1.0) ? 1.0 : alpha;
+          } else {
+            alpha = 0.0;
+          }
+          limiter_activated_right++;
+        } else {
+          // Additional bounds-preserving limiter
+          CeedScalar grad_dot_dx = grad_h[0] * dx_edge + grad_h[1] * dy_edge;
+          if (grad_dot_dx > 0.0 && h_recon_trial > h_max) {
+            alpha = (h_max - qR[0]) / grad_dot_dx;
+            limiter_activated_right++;
+          } else if (grad_dot_dx < 0.0 && h_recon_trial < h_min) {
+            alpha = (h_min - qR[0]) / grad_dot_dx;
+            limiter_activated_right++;
+          }
+          alpha = (alpha < 0.0) ? 0.0 : alpha;
+          alpha = (alpha > 1.0) ? 1.0 : alpha;
+        }
+        
+        // Apply limiter to all variables
+        qR_recon[0] = qR[0] + alpha * (grad_h[0] * dx_edge + grad_h[1] * dy_edge);
+        qR_recon[1] = qR[1] + alpha * (grad_hu[0] * dx_edge + grad_hu[1] * dy_edge);
+        qR_recon[2] = qR[2] + alpha * (grad_hv[0] * dx_edge + grad_hv[1] * dy_edge);
+        
+        // Final safety check
+        if (qR_recon[0] < tiny_h) {
           qR_recon[0] = qR[0];
           qR_recon[1] = qR[1];
           qR_recon[2] = qR[2];
+        } else if (alpha > 0.1) {
+          used_second_order_right = 1;
+          second_order_right++;
         }
       }
     }
     
-    // compute fluxes using reconstructed states
+    // Compute fluxes using reconstructed states
     CeedScalar f[3], amax;
     if (qL_recon[0] > tiny_h || qR_recon[0] > tiny_h) {
       SWERiemannFlux_Roe(gravity, tiny_h, h_anuga,
@@ -279,8 +372,15 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
         cell_R[j][i] = f[j] * (edge_length / Ar);
         flux[j][i] = f[j];
       }
-      courant[0][i] = -amax * edge_length / Al * dt;
-      courant[1][i] = amax * edge_length / Ar * dt;
+      
+      CeedScalar courant_L = -amax * edge_length / Al * dt;
+      CeedScalar courant_R = amax * edge_length / Ar * dt;
+      courant[0][i] = courant_L;
+      courant[1][i] = courant_R;
+      
+      // Track maximum Courant number
+      CeedScalar local_max_courant = fabs(courant_L) > fabs(courant_R) ? fabs(courant_L) : fabs(courant_R);
+      max_courant = (local_max_courant > max_courant) ? local_max_courant : max_courant;
     } else {
       for (CeedInt j = 0; j < 3; j++) {
         cell_L[j][i] = 0.0;
@@ -291,6 +391,22 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
       courant[1][i] = 0.0;
     }
   }
+  
+  // Print diagnostics (only from rank 0 or first Q-function call to avoid spam)
+  static int call_count = 0;
+  if (call_count % 100 == 0) {  // Print every 100 calls
+    CeedScalar pct_second_order_left = total_edges > 0 ? 100.0 * second_order_left / total_edges : 0.0;
+    CeedScalar pct_second_order_right = total_edges > 0 ? 100.0 * second_order_right / total_edges : 0.0;
+    CeedScalar pct_limited_left = total_edges > 0 ? 100.0 * limiter_activated_left / total_edges : 0.0;
+    CeedScalar pct_limited_right = total_edges > 0 ? 100.0 * limiter_activated_right / total_edges : 0.0;
+    
+    printf("[SWE Flux Diagnostics - Call %d]\n", call_count);
+    printf("  Total edges: %d\n", total_edges);
+    printf("  Left cell:  %.1f%% second-order, %.1f%% limited\n", pct_second_order_left, pct_limited_left);
+    printf("  Right cell: %.1f%% second-order, %.1f%% limited\n", pct_second_order_right, pct_limited_right);
+    printf("  Max Courant number: %.4f %s\n", max_courant, max_courant > 1.0 ? "[UNSTABLE!]" : "[stable]");
+  }
+  call_count++;
   
   return 0;
 }
