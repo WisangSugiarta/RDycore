@@ -183,60 +183,63 @@ static PetscErrorCode AddOperatorFluxDivergence(Operator *op) {
 PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_mesh, PetscInt num_comp, PetscInt num_regions, RDyRegion *regions,
                               PetscInt num_boundaries, RDyBoundary *boundaries, RDyCondition *boundary_conditions, Operator **operator) {
   PetscFunctionBegin;
-
   MPI_Comm comm;
   PetscCall(PetscObjectGetComm((PetscObject)domain_dm, &comm));
-
+  
+  // Parse slope reconstruction option
+  PetscBool use_slope_reconstruction = PETSC_FALSE;
+  PetscCall(PetscOptionsGetBool(NULL, NULL, "-use_slope_reconstruction", &use_slope_reconstruction, NULL));
+  
   // check our arguments
   PetscCheck(domain_mesh, comm, PETSC_ERR_USER, "Cannot create an operator with no mesh");
   PetscCheck(num_regions > 0, comm, PETSC_ERR_USER, "Cannot create an operator with no regions");
-  // NOTE: num_boundaries can be zero in a subdomain in a parallel simulation
-
+  
   PetscCall(PetscCalloc1(1, operator));
   (*operator)->config         = config;
   (*operator)->num_components = num_comp;
-
+  
   PetscCall(SetOperatorDomain(*operator, domain_dm, domain_mesh));
+  
   if (num_boundaries > 0) {
-    // set up boundaries for the operator, allocating any necessary storage
-    // (e.g. sequential vectors for PETSc operator)
     PetscCall(SetOperatorBoundaries(*operator, num_boundaries, boundaries, boundary_conditions));
   }
-
-  // set up regions for the operator, allocating any necessary storage
-  // (e.g. sequential vectors for PETSc operator)
+  
   PetscCall(SetOperatorRegions(*operator, num_regions, regions));
-
-  // construct CEED or PETSc versions of the flux/sources operators based on
-  // our configuration
+  
+  // construct CEED or PETSc versions of the flux/sources operators
   if (CeedEnabled()) {
-    // register a logging event for applying our CEED operator
     static PetscBool first_time = PETSC_TRUE;
     if (first_time) {
       PetscCall(PetscLogEventRegister("CeedOperatorApp", RDY_CLASSID, &RDY_CeedOperatorApply_));
       first_time = PETSC_FALSE;
     }
-
     PetscCall(CreateCeedFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
-                                     (*operator)->boundary_conditions, &(*operator)->ceed.flux));
+                                       (*operator)->boundary_conditions, &(*operator)->ceed.flux));
+    
     PetscCall(CreateCeedSourceOperator((*operator)->config, (*operator)->mesh, &(*operator)->ceed.source));
   } else {
-    PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
-                                      (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
-                                      &(*operator)->diagnostics, &(*operator)->petsc.flux));
+    // PETSc path with slope reconstruction support
+    if (use_slope_reconstruction) {
+      printf("DEBUG: Using PETSc Operator Reconstruction\n");
+      PetscCall(CreatePetscFluxOperatorReconstructed((*operator)->config, domain_dm, (*operator)->mesh, (*operator)->num_boundaries, 
+                                                      (*operator)->boundaries, (*operator)->boundary_conditions, 
+                                                      (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
+                                                      &(*operator)->diagnostics, &(*operator)->petsc.flux));
+    } else {
+      printf("DEBUG: Not Using Reconstruction\n");
+      PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
+                                        (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
+                                        &(*operator)->diagnostics, &(*operator)->petsc.flux));
+    }
     PetscCall(CreatePetscSourceOperator((*operator)->config, (*operator)->mesh, (*operator)->petsc.external_sources,
                                         (*operator)->petsc.material_properties, &(*operator)->petsc.source));
   }
-
-  // set up our flux divergence vector(s)
+  
   PetscCall(AddOperatorFluxDivergence(*operator));
-
-  // initialize diagnostics
   PetscCall(ResetOperatorDiagnostics(*operator));
-
+  
   PetscFunctionReturn(PETSC_SUCCESS);
 }
-
 /// Frees all resources devoted to the operator.
 /// @param [out] op the operator to be freed
 PetscErrorCode DestroyOperator(Operator **op) {
