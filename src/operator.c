@@ -189,6 +189,9 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
   MPI_Comm comm;
   PetscCall(PetscObjectGetComm((PetscObject)domain_dm, &comm));
 
+  PetscBool use_slope_reconstruction = PETSC_FALSE;
+  PetscCall(PetscOptionsGetBool(NULL, NULL, "-use_slope_reconstruction", &use_slope_reconstruction, NULL));
+
   // check our arguments
   PetscCheck(domain_mesh, comm, PETSC_ERR_USER, "Cannot create an operator with no mesh");
   PetscCheck(num_regions > 0, comm, PETSC_ERR_USER, "Cannot create an operator with no regions");
@@ -218,11 +221,18 @@ PetscErrorCode CreateOperator(RDyConfig *config, DM domain_dm, RDyMesh *domain_m
       PetscCall(PetscLogEventRegister("CeedOperatorApp", RDY_CLASSID, &RDY_CeedOperatorApply_));
       first_time = PETSC_FALSE;
     }
-
+    if (use_slope_reconstruction) {
+    printf("DEBUG: Using slope reconstruction\n");
+    PetscCall(CreateCeedFluxOperatorReconstructed((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
+                                     (*operator)->boundary_conditions, &(*operator)->ceed.flux));
+    } else {
+    printf("DEBUG: NOT using slope reconstruction\n");
     PetscCall(CreateCeedFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                      (*operator)->boundary_conditions, &(*operator)->ceed.flux));
+  }
     PetscCall(CreateCeedSourceOperator((*operator)->config, (*operator)->mesh, &(*operator)->ceed.source));
   } else {
+    printf("DEBUG: Not using CEED\n");
     PetscCall(CreatePetscFluxOperator((*operator)->config, (*operator)->mesh, (*operator)->num_boundaries, (*operator)->boundaries,
                                       (*operator)->boundary_conditions, (*operator)->petsc.boundary_values, (*operator)->petsc.boundary_fluxes,
                                       (*operator)->petsc.boundary_fluxes_accum, &(*operator)->diagnostics, &(*operator)->petsc.flux));
