@@ -97,7 +97,6 @@ CEED_QFUNCTION(SWEFlux_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], 
   return SWEFlux(ctx, Q, in, out, RIEMANN_FLUX_ROE);
 }
 
-// SWE interior flux operator Q-function with slope reconstruction
 CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q, 
                                                      const CeedScalar *const in[], 
                                                      CeedScalar *const out[]) {
@@ -132,44 +131,18 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
     CeedScalar qL[3] = {q_left[0][i], q_left[1][i], q_left[2][i]};
     CeedScalar qR[3] = {q_right[0][i], q_right[1][i], q_right[2][i]};
 
-    // Initialize reconstructed values to cell averages (first order fallback)
+    // Initialize reconstructed values to cell averages
     CeedScalar qL_recon[3] = {qL[0], qL[1], qL[2]};
     CeedScalar qR_recon[3] = {qR[0], qR[1], qR[2]};
 
-    // Only reconstruct if we have valid neighbor data
-    int has_left_neighbors = 0;
-    int has_right_neighbors = 0;
-
-    // Check if left cell has valid neighbors
-    for (CeedInt n = 0; n < 4; n++) {
-      CeedScalar nx = neighbor_coords[2*n][i];
-      CeedScalar ny = neighbor_coords[2*n+1][i];
-      if (sqrt(nx*nx + ny*ny) > 1e-12) {
-        has_left_neighbors = 1;
-        break;
-      }
-    }
-
-    // Check if right cell has valid neighbors
-    for (CeedInt n = 0; n < 4; n++) {
-      CeedScalar nx = neighbor_coords[8 + 2*n][i];
-      CeedScalar ny = neighbor_coords[8 + 2*n+1][i];
-      if (sqrt(nx*nx + ny*ny) > 1e-12) {
-        has_right_neighbors = 1;
-        break;
-      }
-    }
-
-    // Perform reconstruction for left cell
-    if (has_left_neighbors && qL[0] > tiny_h) {
+    // LEFT CELL RECONSTRUCTION - Simple averaging method
+    if (qL[0] > tiny_h) {
       CeedScalar grad_h[2] = {0.0, 0.0};
       CeedScalar grad_hu[2] = {0.0, 0.0};
       CeedScalar grad_hv[2] = {0.0, 0.0};
+      CeedScalar total_weight = 0.0;
 
-      CeedInt n_valid = 0;
-      CeedScalar h_min = qL[0];
-      CeedScalar h_max = qL[0];
-
+      // Use simple inverse distance weighting (not squared!)
       for (CeedInt n = 0; n < 4; n++) {
         CeedScalar nx = neighbor_coords[2*n][i];
         CeedScalar ny = neighbor_coords[2*n+1][i];
@@ -180,82 +153,52 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
           CeedScalar hu_n = neighbor_values[n*3 + 1][i];
           CeedScalar hv_n = neighbor_values[n*3 + 2][i];
 
-          h_min = (h_n < h_min) ? h_n : h_min;
-          h_max = (h_n > h_max) ? h_n : h_max;
-
           CeedScalar dx = nx - xl;
           CeedScalar dy = ny - yl;
           CeedScalar d = sqrt(dx*dx + dy*dy);
 
           if (d > 1e-12) {
-            grad_h[0] += (h_n - qL[0]) * dx / (d * d);
-            grad_h[1] += (h_n - qL[0]) * dy / (d * d);
-            grad_hu[0] += (hu_n - qL[1]) * dx / (d * d);
-            grad_hu[1] += (hu_n - qL[1]) * dy / (d * d);
-            grad_hv[0] += (hv_n - qL[2]) * dx / (d * d);
-            grad_hv[1] += (hv_n - qL[2]) * dy / (d * d);
-            n_valid++;
+            // Use 1/d weighting instead of 1/d^2 for stability
+            CeedScalar weight = 1.0 / d;
+            CeedScalar inv_d = 1.0 / d;
+            
+            grad_h[0] += weight * (h_n - qL[0]) * dx * inv_d;
+            grad_h[1] += weight * (h_n - qL[0]) * dy * inv_d;
+            grad_hu[0] += weight * (hu_n - qL[1]) * dx * inv_d;
+            grad_hu[1] += weight * (hu_n - qL[1]) * dy * inv_d;
+            grad_hv[0] += weight * (hv_n - qL[2]) * dx * inv_d;
+            grad_hv[1] += weight * (hv_n - qL[2]) * dy * inv_d;
+            
+            total_weight += weight;
           }
         }
       }
 
-      if (n_valid > 0) {
-        grad_h[0] /= n_valid; grad_h[1] /= n_valid;
-        grad_hu[0] /= n_valid; grad_hu[1] /= n_valid;
-        grad_hv[0] /= n_valid; grad_hv[1] /= n_valid;
+      if (total_weight > 1e-12) {
+        // Normalize by total weight
+        grad_h[0] /= total_weight;
+        grad_h[1] /= total_weight;
+        grad_hu[0] /= total_weight;
+        grad_hu[1] /= total_weight;
+        grad_hv[0] /= total_weight;
+        grad_hv[1] /= total_weight;
 
+        // Extrapolate to edge midpoint
         CeedScalar dx_edge = edge_mid_x - xl;
         CeedScalar dy_edge = edge_mid_y - yl;
 
-        CeedScalar h_recon_trial = qL[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
-
-        // Positivity-preserving limiter: ensure h stays within [h_min, h_max]
-        CeedScalar alpha = 1.0;
-        if (h_recon_trial < tiny_h) {
-          // Need to reduce slope to maintain positivity
-          CeedScalar grad_dot_dx = grad_h[0] * dx_edge + grad_h[1] * dy_edge;
-          if (fabs(grad_dot_dx) > 1e-14) {
-            alpha = (tiny_h - qL[0]) / grad_dot_dx;
-            alpha = (alpha < 0.0) ? 0.0 : alpha;
-            alpha = (alpha > 1.0) ? 1.0 : alpha;
-          } else {
-            alpha = 0.0;
-          }
-        } else {
-          // Additional bounds-preserving limiter
-          CeedScalar grad_dot_dx = grad_h[0] * dx_edge + grad_h[1] * dy_edge;
-          if (grad_dot_dx > 0.0 && h_recon_trial > h_max) {
-            alpha = (h_max - qL[0]) / grad_dot_dx;
-          } else if (grad_dot_dx < 0.0 && h_recon_trial < h_min) {
-            alpha = (h_min - qL[0]) / grad_dot_dx;
-          }
-          alpha = (alpha < 0.0) ? 0.0 : alpha;
-          alpha = (alpha > 1.0) ? 1.0 : alpha;
-        }
-
-        // Apply limiter to all variables
-        qL_recon[0] = qL[0] + alpha * (grad_h[0] * dx_edge + grad_h[1] * dy_edge);
-        qL_recon[1] = qL[1] + alpha * (grad_hu[0] * dx_edge + grad_hu[1] * dy_edge);
-        qL_recon[2] = qL[2] + alpha * (grad_hv[0] * dx_edge + grad_hv[1] * dy_edge);
-
-        // Final safety check
-        if (qL_recon[0] < tiny_h) {
-          qL_recon[0] = qL[0];
-          qL_recon[1] = qL[1];
-          qL_recon[2] = qL[2];
-        }
+        qL_recon[0] = qL[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
+        qL_recon[1] = qL[1] + grad_hu[0] * dx_edge + grad_hu[1] * dy_edge;
+        qL_recon[2] = qL[2] + grad_hv[0] * dx_edge + grad_hv[1] * dy_edge;
       }
     }
 
-    // Perform reconstruction for right cell
-    if (has_right_neighbors && qR[0] > tiny_h) {
+    // RIGHT CELL RECONSTRUCTION - Simple averaging method
+    if (qR[0] > tiny_h) {
       CeedScalar grad_h[2] = {0.0, 0.0};
       CeedScalar grad_hu[2] = {0.0, 0.0};
       CeedScalar grad_hv[2] = {0.0, 0.0};
-
-      CeedInt n_valid = 0;
-      CeedScalar h_min = qR[0];
-      CeedScalar h_max = qR[0];
+      CeedScalar total_weight = 0.0;
 
       for (CeedInt n = 0; n < 4; n++) {
         CeedScalar nx = neighbor_coords[8 + 2*n][i];
@@ -267,73 +210,44 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
           CeedScalar hu_n = neighbor_values[12 + n*3 + 1][i];
           CeedScalar hv_n = neighbor_values[12 + n*3 + 2][i];
 
-          h_min = (h_n < h_min) ? h_n : h_min;
-          h_max = (h_n > h_max) ? h_n : h_max;
-
           CeedScalar dx = nx - xr;
           CeedScalar dy = ny - yr;
           CeedScalar d = sqrt(dx*dx + dy*dy);
 
           if (d > 1e-12) {
-            grad_h[0] += (h_n - qR[0]) * dx / (d * d);
-            grad_h[1] += (h_n - qR[0]) * dy / (d * d);
-            grad_hu[0] += (hu_n - qR[1]) * dx / (d * d);
-            grad_hu[1] += (hu_n - qR[1]) * dy / (d * d);
-            grad_hv[0] += (hv_n - qR[2]) * dx / (d * d);
-            grad_hv[1] += (hv_n - qR[2]) * dy / (d * d);
-            n_valid++;
+            CeedScalar weight = 1.0 / d;
+            CeedScalar inv_d = 1.0 / d;
+            
+            grad_h[0] += weight * (h_n - qR[0]) * dx * inv_d;
+            grad_h[1] += weight * (h_n - qR[0]) * dy * inv_d;
+            grad_hu[0] += weight * (hu_n - qR[1]) * dx * inv_d;
+            grad_hu[1] += weight * (hu_n - qR[1]) * dy * inv_d;
+            grad_hv[0] += weight * (hv_n - qR[2]) * dx * inv_d;
+            grad_hv[1] += weight * (hv_n - qR[2]) * dy * inv_d;
+            
+            total_weight += weight;
           }
         }
       }
 
-      if (n_valid > 0) {
-        grad_h[0] /= n_valid; grad_h[1] /= n_valid;
-        grad_hu[0] /= n_valid; grad_hu[1] /= n_valid;
-        grad_hv[0] /= n_valid; grad_hv[1] /= n_valid;
+      if (total_weight > 1e-12) {
+        grad_h[0] /= total_weight;
+        grad_h[1] /= total_weight;
+        grad_hu[0] /= total_weight;
+        grad_hu[1] /= total_weight;
+        grad_hv[0] /= total_weight;
+        grad_hv[1] /= total_weight;
 
         CeedScalar dx_edge = edge_mid_x - xr;
         CeedScalar dy_edge = edge_mid_y - yr;
 
-        CeedScalar h_recon_trial = qR[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
-
-        // Positivity-preserving limiter
-        CeedScalar alpha = 1.0;
-        if (h_recon_trial < tiny_h) {
-          CeedScalar grad_dot_dx = grad_h[0] * dx_edge + grad_h[1] * dy_edge;
-          if (fabs(grad_dot_dx) > 1e-14) {
-            alpha = (tiny_h - qR[0]) / grad_dot_dx;
-            alpha = (alpha < 0.0) ? 0.0 : alpha;
-            alpha = (alpha > 1.0) ? 1.0 : alpha;
-          } else {
-            alpha = 0.0;
-          }
-        } else {
-          // Additional bounds-preserving limiter
-          CeedScalar grad_dot_dx = grad_h[0] * dx_edge + grad_h[1] * dy_edge;
-          if (grad_dot_dx > 0.0 && h_recon_trial > h_max) {
-            alpha = (h_max - qR[0]) / grad_dot_dx;
-          } else if (grad_dot_dx < 0.0 && h_recon_trial < h_min) {
-            alpha = (h_min - qR[0]) / grad_dot_dx;
-          }
-          alpha = (alpha < 0.0) ? 0.0 : alpha;
-          alpha = (alpha > 1.0) ? 1.0 : alpha;
-        }
-
-        // Apply limiter to all variables
-        qR_recon[0] = qR[0] + alpha * (grad_h[0] * dx_edge + grad_h[1] * dy_edge);
-        qR_recon[1] = qR[1] + alpha * (grad_hu[0] * dx_edge + grad_hu[1] * dy_edge);
-        qR_recon[2] = qR[2] + alpha * (grad_hv[0] * dx_edge + grad_hv[1] * dy_edge);
-
-        // Final safety check
-        if (qR_recon[0] < tiny_h) {
-          qR_recon[0] = qR[0];
-          qR_recon[1] = qR[1];
-          qR_recon[2] = qR[2];
-        }
+        qR_recon[0] = qR[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
+        qR_recon[1] = qR[1] + grad_hu[0] * dx_edge + grad_hu[1] * dy_edge;
+        qR_recon[2] = qR[2] + grad_hv[0] * dx_edge + grad_hv[1] * dy_edge;
       }
     }
 
-    // Compute fluxes using reconstructed states
+    // COMPUTE FLUXES
     CeedScalar f[3], amax;
     if (qL_recon[0] > tiny_h || qR_recon[0] > tiny_h) {
       SWERiemannFlux_Roe(gravity, tiny_h, h_anuga,
