@@ -97,6 +97,192 @@ CEED_QFUNCTION(SWEFlux_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], 
   return SWEFlux(ctx, Q, in, out, RIEMANN_FLUX_ROE);
 }
 
+CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q, 
+                                                     const CeedScalar *const in[], 
+                                                     CeedScalar *const out[]) {
+  const CeedScalar(*edge_data)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[0];
+  const CeedScalar(*cell_data)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[1];
+  const CeedScalar(*neighbor_coords)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[2];
+  const CeedScalar(*neighbor_values)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[3];
+  const CeedScalar(*q_left)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[4];
+  const CeedScalar(*q_right)[CEED_Q_VLA] = (const CeedScalar(*)[CEED_Q_VLA])in[5];
+
+  CeedScalar(*cell_L)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[0];
+  CeedScalar(*cell_R)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[1];
+  CeedScalar(*flux)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[2];
+  CeedScalar(*courant)[CEED_Q_VLA] = (CeedScalar(*)[CEED_Q_VLA])out[3];
+
+  const SWEContext context = (SWEContext)ctx;
+  const CeedScalar gravity = context->gravity;
+  const CeedScalar tiny_h = context->tiny_h;
+  const CeedScalar dt = context->dtime;
+  const CeedScalar h_anuga = context->h_anuga_regular;
+
+  for (CeedInt i = 0; i < Q; i++) {
+    CeedScalar sn = edge_data[0][i];
+    CeedScalar cn = edge_data[1][i];
+    CeedScalar edge_length = edge_data[2][i];
+    CeedScalar edge_mid_x = edge_data[3][i];
+    CeedScalar edge_mid_y = edge_data[4][i];
+
+    CeedScalar xl = cell_data[0][i], yl = cell_data[1][i], Al = cell_data[2][i];
+    CeedScalar xr = cell_data[3][i], yr = cell_data[4][i], Ar = cell_data[5][i];
+
+    CeedScalar qL[3] = {q_left[0][i], q_left[1][i], q_left[2][i]};
+    CeedScalar qR[3] = {q_right[0][i], q_right[1][i], q_right[2][i]};
+
+    // Initialize reconstructed values to cell averages
+    CeedScalar qL_recon[3] = {qL[0], qL[1], qL[2]};
+    CeedScalar qR_recon[3] = {qR[0], qR[1], qR[2]};
+
+    // LEFT CELL RECONSTRUCTION - Simple averaging method
+    if (qL[0] > tiny_h) {
+      CeedScalar grad_h[2] = {0.0, 0.0};
+      CeedScalar grad_hu[2] = {0.0, 0.0};
+      CeedScalar grad_hv[2] = {0.0, 0.0};
+      CeedScalar total_weight = 0.0;
+
+      // Use simple inverse distance weighting (not squared!)
+      for (CeedInt n = 0; n < 4; n++) {
+        CeedScalar nx = neighbor_coords[2*n][i];
+        CeedScalar ny = neighbor_coords[2*n+1][i];
+        CeedScalar dist = sqrt(nx*nx + ny*ny);
+
+        if (dist > 1e-12) {
+          CeedScalar h_n = neighbor_values[n*3 + 0][i];
+          CeedScalar hu_n = neighbor_values[n*3 + 1][i];
+          CeedScalar hv_n = neighbor_values[n*3 + 2][i];
+
+          CeedScalar dx = nx - xl;
+          CeedScalar dy = ny - yl;
+          CeedScalar d = sqrt(dx*dx + dy*dy);
+
+          if (d > 1e-12) {
+            // Use 1/d weighting instead of 1/d^2 for stability
+            CeedScalar weight = 1.0 / d;
+            CeedScalar inv_d = 1.0 / d;
+            
+            grad_h[0] += weight * (h_n - qL[0]) * dx * inv_d;
+            grad_h[1] += weight * (h_n - qL[0]) * dy * inv_d;
+            grad_hu[0] += weight * (hu_n - qL[1]) * dx * inv_d;
+            grad_hu[1] += weight * (hu_n - qL[1]) * dy * inv_d;
+            grad_hv[0] += weight * (hv_n - qL[2]) * dx * inv_d;
+            grad_hv[1] += weight * (hv_n - qL[2]) * dy * inv_d;
+            
+            total_weight += weight;
+          }
+        }
+      }
+
+      if (total_weight > 1e-12) {
+        // Normalize by total weight
+        grad_h[0] /= total_weight;
+        grad_h[1] /= total_weight;
+        grad_hu[0] /= total_weight;
+        grad_hu[1] /= total_weight;
+        grad_hv[0] /= total_weight;
+        grad_hv[1] /= total_weight;
+
+        // Extrapolate to edge midpoint
+        CeedScalar dx_edge = edge_mid_x - xl;
+        CeedScalar dy_edge = edge_mid_y - yl;
+
+        qL_recon[0] = qL[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
+        qL_recon[1] = qL[1] + grad_hu[0] * dx_edge + grad_hu[1] * dy_edge;
+        qL_recon[2] = qL[2] + grad_hv[0] * dx_edge + grad_hv[1] * dy_edge;
+      }
+    }
+
+    // RIGHT CELL RECONSTRUCTION - Simple averaging method
+    if (qR[0] > tiny_h) {
+      CeedScalar grad_h[2] = {0.0, 0.0};
+      CeedScalar grad_hu[2] = {0.0, 0.0};
+      CeedScalar grad_hv[2] = {0.0, 0.0};
+      CeedScalar total_weight = 0.0;
+
+      for (CeedInt n = 0; n < 4; n++) {
+        CeedScalar nx = neighbor_coords[8 + 2*n][i];
+        CeedScalar ny = neighbor_coords[8 + 2*n+1][i];
+        CeedScalar dist = sqrt(nx*nx + ny*ny);
+
+        if (dist > 1e-12) {
+          CeedScalar h_n = neighbor_values[12 + n*3 + 0][i];
+          CeedScalar hu_n = neighbor_values[12 + n*3 + 1][i];
+          CeedScalar hv_n = neighbor_values[12 + n*3 + 2][i];
+
+          CeedScalar dx = nx - xr;
+          CeedScalar dy = ny - yr;
+          CeedScalar d = sqrt(dx*dx + dy*dy);
+
+          if (d > 1e-12) {
+            CeedScalar weight = 1.0 / d;
+            CeedScalar inv_d = 1.0 / d;
+            
+            grad_h[0] += weight * (h_n - qR[0]) * dx * inv_d;
+            grad_h[1] += weight * (h_n - qR[0]) * dy * inv_d;
+            grad_hu[0] += weight * (hu_n - qR[1]) * dx * inv_d;
+            grad_hu[1] += weight * (hu_n - qR[1]) * dy * inv_d;
+            grad_hv[0] += weight * (hv_n - qR[2]) * dx * inv_d;
+            grad_hv[1] += weight * (hv_n - qR[2]) * dy * inv_d;
+            
+            total_weight += weight;
+          }
+        }
+      }
+
+      if (total_weight > 1e-12) {
+        grad_h[0] /= total_weight;
+        grad_h[1] /= total_weight;
+        grad_hu[0] /= total_weight;
+        grad_hu[1] /= total_weight;
+        grad_hv[0] /= total_weight;
+        grad_hv[1] /= total_weight;
+
+        CeedScalar dx_edge = edge_mid_x - xr;
+        CeedScalar dy_edge = edge_mid_y - yr;
+
+        qR_recon[0] = qR[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
+        qR_recon[1] = qR[1] + grad_hu[0] * dx_edge + grad_hu[1] * dy_edge;
+        qR_recon[2] = qR[2] + grad_hv[0] * dx_edge + grad_hv[1] * dy_edge;
+      }
+    }
+
+    // COMPUTE FLUXES
+    CeedScalar f[3], amax;
+    if (qL_recon[0] > tiny_h || qR_recon[0] > tiny_h) {
+      SWERiemannFlux_Roe(gravity, tiny_h, h_anuga,
+                        (SWEState){qL_recon[0], qL_recon[1], qL_recon[2]},
+                        (SWEState){qR_recon[0], qR_recon[1], qR_recon[2]},
+                        sn, cn, f, &amax);
+
+      for (CeedInt j = 0; j < 3; j++) {
+        cell_L[j][i] = f[j] * (-edge_length / Al);
+        cell_R[j][i] = f[j] * (edge_length / Ar);
+        flux[j][i] = f[j];
+      }
+
+      CeedScalar courant_L = -amax * edge_length / Al * dt;
+      CeedScalar courant_R = amax * edge_length / Ar * dt;
+      courant[0][i] = courant_L;
+      courant[1][i] = courant_R;
+    } else {
+      for (CeedInt j = 0; j < 3; j++) {
+        cell_L[j][i] = 0.0;
+        cell_R[j][i] = 0.0;
+        flux[j][i] = 0.0;
+      }
+      courant[0][i] = 0.0;
+      courant[1][i] = 0.0;
+    }
+  }
+
+  return 0;
+}
+
+CEED_QFUNCTION(SWEFluxReconstruction_Roe)(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[]) {
+  return SWEFluxReconstructionKernel(ctx, Q, in, out);
+}
+
 // SWE boundary flux operator Q-function (Dirichlet condition)
 CEED_QFUNCTION_HELPER int SWEBoundaryFlux_Dirichlet(void *ctx, CeedInt Q, const CeedScalar *const in[], CeedScalar *const out[],
                                                     RiemannFluxType flux_type) {
