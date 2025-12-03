@@ -135,47 +135,43 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
     CeedScalar qL_recon[3] = {qL[0], qL[1], qL[2]};
     CeedScalar qR_recon[3] = {qR[0], qR[1], qR[2]};
 
-    // LEFT CELL RECONSTRUCTION - Simple averaging method
+    // LEFT CELL RECONSTRUCTION
     if (qL[0] > tiny_h) {
       CeedScalar grad_h[2] = {0.0, 0.0};
       CeedScalar grad_hu[2] = {0.0, 0.0};
       CeedScalar grad_hv[2] = {0.0, 0.0};
       CeedScalar total_weight = 0.0;
 
-      // Use simple inverse distance weighting (not squared!)
       for (CeedInt n = 0; n < 4; n++) {
         CeedScalar nx = neighbor_coords[2*n][i];
         CeedScalar ny = neighbor_coords[2*n+1][i];
-        CeedScalar dist = sqrt(nx*nx + ny*ny);
 
-        if (dist > 1e-12) {
+        // Skip invalid neighbors (marked by (0,0) coordinates)
+        if (nx == 0.0 && ny == 0.0) continue;
+
+        CeedScalar dx = nx - xl;
+        CeedScalar dy = ny - yl;
+        CeedScalar d_sq = dx*dx + dy*dy;
+
+        if (d_sq > 1e-12) {
           CeedScalar h_n = neighbor_values[n*3 + 0][i];
           CeedScalar hu_n = neighbor_values[n*3 + 1][i];
           CeedScalar hv_n = neighbor_values[n*3 + 2][i];
 
-          CeedScalar dx = nx - xl;
-          CeedScalar dy = ny - yl;
-          CeedScalar d = sqrt(dx*dx + dy*dy);
+          // Simple gradient estimate: dh/dx ≈ (h_n - h_c) * dx / d²
+          // No distance weighting - all neighbors contribute equally
+          grad_h[0] += (h_n - qL[0]) * dx / d_sq;
+          grad_h[1] += (h_n - qL[0]) * dy / d_sq;
+          grad_hu[0] += (hu_n - qL[1]) * dx / d_sq;
+          grad_hu[1] += (hu_n - qL[1]) * dy / d_sq;
+          grad_hv[0] += (hv_n - qL[2]) * dx / d_sq;
+          grad_hv[1] += (hv_n - qL[2]) * dy / d_sq;
 
-          if (d > 1e-12) {
-            // Use 1/d weighting instead of 1/d^2 for stability
-            CeedScalar weight = 1.0 / d;
-            CeedScalar inv_d = 1.0 / d;
-            
-            grad_h[0] += weight * (h_n - qL[0]) * dx * inv_d;
-            grad_h[1] += weight * (h_n - qL[0]) * dy * inv_d;
-            grad_hu[0] += weight * (hu_n - qL[1]) * dx * inv_d;
-            grad_hu[1] += weight * (hu_n - qL[1]) * dy * inv_d;
-            grad_hv[0] += weight * (hv_n - qL[2]) * dx * inv_d;
-            grad_hv[1] += weight * (hv_n - qL[2]) * dy * inv_d;
-            
-            total_weight += weight;
-          }
+          total_weight += 1.0;
         }
       }
 
-      if (total_weight > 1e-12) {
-        // Normalize by total weight
+      if (total_weight > 0.5) {
         grad_h[0] /= total_weight;
         grad_h[1] /= total_weight;
         grad_hu[0] /= total_weight;
@@ -183,7 +179,6 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
         grad_hv[0] /= total_weight;
         grad_hv[1] /= total_weight;
 
-        // Extrapolate to edge midpoint
         CeedScalar dx_edge = edge_mid_x - xl;
         CeedScalar dy_edge = edge_mid_y - yl;
 
@@ -193,7 +188,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
       }
     }
 
-    // RIGHT CELL RECONSTRUCTION - Simple averaging method
+    // RIGHT CELL RECONSTRUCTION
     if (qR[0] > tiny_h) {
       CeedScalar grad_h[2] = {0.0, 0.0};
       CeedScalar grad_hu[2] = {0.0, 0.0};
@@ -203,34 +198,33 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
       for (CeedInt n = 0; n < 4; n++) {
         CeedScalar nx = neighbor_coords[8 + 2*n][i];
         CeedScalar ny = neighbor_coords[8 + 2*n+1][i];
-        CeedScalar dist = sqrt(nx*nx + ny*ny);
 
-        if (dist > 1e-12) {
+        // Skip invalid neighbors (marked by (0,0) coordinates)
+        if (nx == 0.0 && ny == 0.0) continue;
+
+        CeedScalar dx = nx - xr;
+        CeedScalar dy = ny - yr;
+        CeedScalar d_sq = dx*dx + dy*dy;
+
+        if (d_sq > 1e-12) {
           CeedScalar h_n = neighbor_values[12 + n*3 + 0][i];
           CeedScalar hu_n = neighbor_values[12 + n*3 + 1][i];
           CeedScalar hv_n = neighbor_values[12 + n*3 + 2][i];
 
-          CeedScalar dx = nx - xr;
-          CeedScalar dy = ny - yr;
-          CeedScalar d = sqrt(dx*dx + dy*dy);
+          // Simple gradient estimate: dh/dx ≈ (h_n - h_c) * dx / d²
+          // No distance weighting - all neighbors contribute equally
+          grad_h[0] += (h_n - qR[0]) * dx / d_sq;
+          grad_h[1] += (h_n - qR[0]) * dy / d_sq;
+          grad_hu[0] += (hu_n - qR[1]) * dx / d_sq;
+          grad_hu[1] += (hu_n - qR[1]) * dy / d_sq;
+          grad_hv[0] += (hv_n - qR[2]) * dx / d_sq;
+          grad_hv[1] += (hv_n - qR[2]) * dy / d_sq;
 
-          if (d > 1e-12) {
-            CeedScalar weight = 1.0 / d;
-            CeedScalar inv_d = 1.0 / d;
-            
-            grad_h[0] += weight * (h_n - qR[0]) * dx * inv_d;
-            grad_h[1] += weight * (h_n - qR[0]) * dy * inv_d;
-            grad_hu[0] += weight * (hu_n - qR[1]) * dx * inv_d;
-            grad_hu[1] += weight * (hu_n - qR[1]) * dy * inv_d;
-            grad_hv[0] += weight * (hv_n - qR[2]) * dx * inv_d;
-            grad_hv[1] += weight * (hv_n - qR[2]) * dy * inv_d;
-            
-            total_weight += weight;
-          }
+          total_weight += 1.0;
         }
       }
 
-      if (total_weight > 1e-12) {
+      if (total_weight > 0.5) {
         grad_h[0] /= total_weight;
         grad_h[1] /= total_weight;
         grad_hu[0] /= total_weight;
