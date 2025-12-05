@@ -135,113 +135,139 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
     CeedScalar qL_recon[3] = {qL[0], qL[1], qL[2]};
     CeedScalar qR_recon[3] = {qR[0], qR[1], qR[2]};
 
-    // LEFT CELL RECONSTRUCTION
+
+    // ========================================================================
+    // LEFT CELL RECONSTRUCTION - FIXED GRADIENT FORMULA
+    // ========================================================================
     if (qL[0] > tiny_h) {
       CeedScalar grad_h[2] = {0.0, 0.0};
       CeedScalar grad_hu[2] = {0.0, 0.0};
       CeedScalar grad_hv[2] = {0.0, 0.0};
-      CeedScalar total_weight = 0.0;
+      CeedScalar sum_weights = 0.0;
+      CeedInt n_valid = 0;
 
       for (CeedInt n = 0; n < 4; n++) {
         CeedScalar nx = neighbor_coords[2*n][i];
         CeedScalar ny = neighbor_coords[2*n+1][i];
 
-        // Skip invalid neighbors (marked by (0,0) coordinates)
         if (nx == 0.0 && ny == 0.0) continue;
 
         CeedScalar dx = nx - xl;
         CeedScalar dy = ny - yl;
         CeedScalar d_sq = dx*dx + dy*dy;
+        CeedScalar d = sqrt(d_sq);
 
-        if (d_sq > 1e-12) {
+        if (d > 1e-6) {
           CeedScalar h_n = neighbor_values[n*3 + 0][i];
           CeedScalar hu_n = neighbor_values[n*3 + 1][i];
           CeedScalar hv_n = neighbor_values[n*3 + 2][i];
 
-          // Simple gradient estimate: dh/dx ≈ (h_n - h_c) * dx / d²
-          // No distance weighting - all neighbors contribute equally
-          grad_h[0] += (h_n - qL[0]) * dx / d_sq;
-          grad_h[1] += (h_n - qL[0]) * dy / d_sq;
-          grad_hu[0] += (hu_n - qL[1]) * dx / d_sq;
-          grad_hu[1] += (hu_n - qL[1]) * dy / d_sq;
-          grad_hv[0] += (hv_n - qL[2]) * dx / d_sq;
-          grad_hv[1] += (hv_n - qL[2]) * dy / d_sq;
+          // FIXED: Inverse distance weighting (1/d instead of 1/d²)
+          // This prevents over-amplification of small variations
+          CeedScalar weight = 1.0 / d;
+          
+          // Gradient contribution: weight * (Δh/d) * direction
+          grad_h[0] += weight * (h_n - qL[0]) * (dx / d);
+          grad_h[1] += weight * (h_n - qL[0]) * (dy / d);
+          grad_hu[0] += weight * (hu_n - qL[1]) * (dx / d);
+          grad_hu[1] += weight * (hu_n - qL[1]) * (dy / d);
+          grad_hv[0] += weight * (hv_n - qL[2]) * (dx / d);
+          grad_hv[1] += weight * (hv_n - qL[2]) * (dy / d);
 
-          total_weight += 1.0;
+          sum_weights += weight;
+          n_valid++;
         }
       }
 
-      if (total_weight > 0.5) {
-        grad_h[0] /= total_weight;
-        grad_h[1] /= total_weight;
-        grad_hu[0] /= total_weight;
-        grad_hu[1] /= total_weight;
-        grad_hv[0] /= total_weight;
-        grad_hv[1] /= total_weight;
+      if (n_valid >= 2 && sum_weights > 1e-12) {
+        // Normalize by sum of weights
+        grad_h[0] /= sum_weights;
+        grad_h[1] /= sum_weights;
+        grad_hu[0] /= sum_weights;
+        grad_hu[1] /= sum_weights;
+        grad_hv[0] /= sum_weights;
+        grad_hv[1] /= sum_weights;
 
+        // Extrapolate from cell center to edge midpoint
         CeedScalar dx_edge = edge_mid_x - xl;
         CeedScalar dy_edge = edge_mid_y - yl;
 
         qL_recon[0] = qL[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
         qL_recon[1] = qL[1] + grad_hu[0] * dx_edge + grad_hu[1] * dy_edge;
         qL_recon[2] = qL[2] + grad_hv[0] * dx_edge + grad_hv[1] * dy_edge;
+
+        // Enforce positivity
+        if (qL_recon[0] < 0.0) qL_recon[0] = 0.0;
       }
     }
 
-    // RIGHT CELL RECONSTRUCTION
+    // ========================================================================
+    // RIGHT CELL RECONSTRUCTION - FIXED GRADIENT FORMULA
+    // ========================================================================
     if (qR[0] > tiny_h) {
       CeedScalar grad_h[2] = {0.0, 0.0};
       CeedScalar grad_hu[2] = {0.0, 0.0};
       CeedScalar grad_hv[2] = {0.0, 0.0};
-      CeedScalar total_weight = 0.0;
+      CeedScalar sum_weights = 0.0;
+      CeedInt n_valid = 0;
 
       for (CeedInt n = 0; n < 4; n++) {
         CeedScalar nx = neighbor_coords[8 + 2*n][i];
         CeedScalar ny = neighbor_coords[8 + 2*n+1][i];
 
-        // Skip invalid neighbors (marked by (0,0) coordinates)
         if (nx == 0.0 && ny == 0.0) continue;
 
         CeedScalar dx = nx - xr;
         CeedScalar dy = ny - yr;
         CeedScalar d_sq = dx*dx + dy*dy;
+        CeedScalar d = sqrt(d_sq);
 
-        if (d_sq > 1e-12) {
+        if (d > 1e-6) {
           CeedScalar h_n = neighbor_values[12 + n*3 + 0][i];
           CeedScalar hu_n = neighbor_values[12 + n*3 + 1][i];
           CeedScalar hv_n = neighbor_values[12 + n*3 + 2][i];
 
-          // Simple gradient estimate: dh/dx ≈ (h_n - h_c) * dx / d²
-          // No distance weighting - all neighbors contribute equally
-          grad_h[0] += (h_n - qR[0]) * dx / d_sq;
-          grad_h[1] += (h_n - qR[0]) * dy / d_sq;
-          grad_hu[0] += (hu_n - qR[1]) * dx / d_sq;
-          grad_hu[1] += (hu_n - qR[1]) * dy / d_sq;
-          grad_hv[0] += (hv_n - qR[2]) * dx / d_sq;
-          grad_hv[1] += (hv_n - qR[2]) * dy / d_sq;
+          // FIXED: Inverse distance weighting (1/d instead of 1/d²)
+          CeedScalar weight = 1.0 / d;
+          
+          // Gradient contribution: weight * (Δh/d) * direction
+          grad_h[0] += weight * (h_n - qR[0]) * (dx / d);
+          grad_h[1] += weight * (h_n - qR[0]) * (dy / d);
+          grad_hu[0] += weight * (hu_n - qR[1]) * (dx / d);
+          grad_hu[1] += weight * (hu_n - qR[1]) * (dy / d);
+          grad_hv[0] += weight * (hv_n - qR[2]) * (dx / d);
+          grad_hv[1] += weight * (hv_n - qR[2]) * (dy / d);
 
-          total_weight += 1.0;
+          sum_weights += weight;
+          n_valid++;
         }
       }
 
-      if (total_weight > 0.5) {
-        grad_h[0] /= total_weight;
-        grad_h[1] /= total_weight;
-        grad_hu[0] /= total_weight;
-        grad_hu[1] /= total_weight;
-        grad_hv[0] /= total_weight;
-        grad_hv[1] /= total_weight;
+      if (n_valid >= 2 && sum_weights > 1e-12) {
+        // Normalize by sum of weights
+        grad_h[0] /= sum_weights;
+        grad_h[1] /= sum_weights;
+        grad_hu[0] /= sum_weights;
+        grad_hu[1] /= sum_weights;
+        grad_hv[0] /= sum_weights;
+        grad_hv[1] /= sum_weights;
 
+        // Extrapolate from cell center to edge midpoint
         CeedScalar dx_edge = edge_mid_x - xr;
         CeedScalar dy_edge = edge_mid_y - yr;
 
         qR_recon[0] = qR[0] + grad_h[0] * dx_edge + grad_h[1] * dy_edge;
         qR_recon[1] = qR[1] + grad_hu[0] * dx_edge + grad_hu[1] * dy_edge;
         qR_recon[2] = qR[2] + grad_hv[0] * dx_edge + grad_hv[1] * dy_edge;
+
+        // Enforce positivity
+        if (qR_recon[0] < 0.0) qR_recon[0] = 0.0;
       }
     }
 
+    // ========================================================================
     // COMPUTE FLUXES
+    // ========================================================================
     CeedScalar f[3], amax;
     if (qL_recon[0] > tiny_h || qR_recon[0] > tiny_h) {
       SWERiemannFlux_Roe(gravity, tiny_h, h_anuga,
@@ -269,6 +295,7 @@ CEED_QFUNCTION_HELPER int SWEFluxReconstructionKernel(void *ctx, CeedInt Q,
       courant[1][i] = 0.0;
     }
   }
+  
 
   return 0;
 }
